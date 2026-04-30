@@ -121,7 +121,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 				Content:    resultStr,
 				ToolCallID: call.ID,
 			})
-			sessionDelta = append(sessionDelta, SessionEvent{Role: RoleTool, Content: resultStr})
+			sessionDelta = append(sessionDelta, SessionEvent{Provider: h.provider.Name(), Role: RoleTool, Content: resultStr})
 		}
 
 		stepCount++

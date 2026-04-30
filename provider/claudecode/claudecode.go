@@ -158,6 +158,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 						sink.Emit(bridle.ModelChunk{Text: block.Text})
 						finalText += block.Text
 						sessionDelta = append(sessionDelta, bridle.SessionEvent{
+							Provider: "claude-code",
 							Role:    bridle.RoleAssistant,
 							Content: block.Text,
 						})
@@ -167,6 +168,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 						pendingCalls[block.ID] = tc
 						raw, _ := json.Marshal(block)
 						sessionDelta = append(sessionDelta, bridle.SessionEvent{
+							Provider: "claude-code",
 							Role:    bridle.RoleAssistant,
 							RawJSON: raw,
 						})
@@ -206,6 +208,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 							sink.Emit(bridle.StepBoundary{Step: stepCount})
 						}
 						sessionDelta = append(sessionDelta, bridle.SessionEvent{
+							Provider: "claude-code",
 							Role:    bridle.RoleTool,
 							Content: block.Content,
 						})

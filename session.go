@@ -1,6 +1,9 @@
 package bridle
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // SessionRole identifies who produced a session event.
 type SessionRole string
@@ -11,6 +14,64 @@ const (
 	RoleTool      SessionRole = "tool"
 	RoleSystem    SessionRole = "system"
 )
+
+// NormalizedSessionEvent is a provider-agnostic view of a SessionEvent,
+// used when displaying or processing session history without knowing the
+// provider's wire format.
+type NormalizedSessionEvent struct {
+	Role    SessionRole
+	Content string // human-readable text representation
+}
+
+// ParseSessionEvent returns a normalized view of a session event.
+// For events with RawJSON, it attempts a provider-specific parse;
+// falls back to Content if RawJSON is absent or unrecognized.
+func ParseSessionEvent(e SessionEvent) (NormalizedSessionEvent, error) {
+	if len(e.RawJSON) == 0 || e.Content != "" {
+		return NormalizedSessionEvent{Role: e.Role, Content: e.Content}, nil
+	}
+	// Provider-specific RawJSON parsing.
+	switch e.Provider {
+	case ProviderClaude, "claude-code":
+		// Both Anthropic providers use the same block shape.
+		var block struct {
+			Type  string `json:"type"`
+			Text  string `json:"text"`
+			Name  string `json:"name"`
+			Input json.RawMessage `json:"input"`
+		}
+		if err := json.Unmarshal(e.RawJSON, &block); err == nil {
+			switch block.Type {
+			case "text":
+				return NormalizedSessionEvent{Role: e.Role, Content: block.Text}, nil
+			case "tool_use":
+				return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: %s %s", block.Name, block.Input)}, nil
+			}
+		}
+	case ProviderOllama:
+		var tc struct {
+			Function struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"function"`
+		}
+		if err := json.Unmarshal(e.RawJSON, &tc); err == nil && tc.Function.Name != "" {
+			return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: %s %s", tc.Function.Name, tc.Function.Arguments)}, nil
+		}
+	case ProviderOpenAI:
+		var tc struct {
+			Function struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function"`
+		}
+		if err := json.Unmarshal(e.RawJSON, &tc); err == nil && tc.Function.Name != "" {
+			return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: %s %s", tc.Function.Name, tc.Function.Arguments)}, nil
+		}
+	}
+	// Unknown provider or shape — return raw bytes as content.
+	return NormalizedSessionEvent{Role: e.Role, Content: string(e.RawJSON)}, nil
+}
 
 // SessionHandle is an opaque reference to provider-side session state.
 // The funnel mints handles and maps them to threads; the provider uses the
