@@ -1,20 +1,13 @@
-// Package claudecode implements the bridle Provider interface by driving the
+// Package claudecode implements the bridle Provider interface using the
 // claude-code CLI in headless mode (claude -p --output-format stream-json --verbose).
 //
-// Shape note: The claude-code CLI manages its own tool loop internally.
-// bridle's BeforeToolCall / AfterToolCall hooks and ToolRunner are NOT invoked
-// on this path — the CLI executes tools itself. The stub funnel passes
-// --allowedTools to restrict the CLI's tool surface to the tools it defines.
+// Category: subprocess-stream. The CLI manages its own agentic loop;
+// bridle parses the stdout event stream. BeforeToolCall does not fire;
+// AfterToolCall fires after each parsed tool_use/tool_result pair (observe-only).
 //
-// This means the bridle ToolRunner contract is not fully exercised via this
-// provider. For full hook + ToolRunner validation use provider/claude (direct
-// API). This provider validates the session-delta, event emission, and
-// stop-reason normalization paths.
-//
-// Spec note: This is a shape mismatch with the bridle spec (§3.3 "providers
-// MUST NOT own tool execution"). Flag to @keel for a spec patch — either
-// the spec needs a "subprocess provider" carve-out, or the real funnel must
-// use provider/claude and manage its own auth.
+// Session continuity: the caller passes a SessionHandle with a non-empty ID
+// to resume a prior session via --resume. For a new session the funnel mints a
+// fresh UUID and the CLI creates a new session file automatically.
 package claudecode
 
 import (
@@ -26,10 +19,13 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"time"
 
 	bridle "github.com/nexus-cw/bridle"
 	"github.com/nexus-cw/bridle/internal/normalize"
 )
+
+const providerID bridle.ProviderID = "claude-code"
 
 // Provider implements bridle.Provider by shelling out to the claude CLI.
 type Provider struct {
@@ -46,7 +42,7 @@ func New() *Provider {
 	return &Provider{ClaudePath: "claude"}
 }
 
-func (p *Provider) Name() bridle.ProviderID { return "claude-code" }
+func (p *Provider) Name() bridle.ProviderID { return providerID }
 
 func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 	return bridle.ProviderCapabilities{
@@ -58,8 +54,9 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 }
 
 // RunTurn invokes the claude CLI and streams its output as bridle events.
-// Tool calls made by the model are executed by the CLI itself; the bridle
-// ToolRunner is NOT called on this path (see package doc).
+// If req.Session.ID is non-empty, passes --resume <id> for continuity.
+// Tool calls are executed by the CLI; bridle's ToolRunner is not called.
+// Cancellation via ctx sends SIGTERM then SIGKILL after a grace period.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	claudePath := p.ClaudePath
 	if claudePath == "" {
@@ -82,9 +79,16 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		args = append(args, "--model", req.Model)
 	}
 
+	// Session continuity: --resume for existing sessions.
+	if req.Session.ID != "" {
+		args = append(args, "--resume", req.Session.ID)
+	}
+
 	args = append(args, p.ExtraArgs...)
 
-	cmd := exec.CommandContext(ctx, claudePath, args...)
+	// Don't use exec.CommandContext — that SIGKILLs immediately on cancel.
+	// We want SIGTERM first, then SIGKILL after a grace period.
+	cmd := exec.Command(claudePath, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -96,14 +100,48 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("claudecode: start: %w", err)
 	}
 
-	result, parseErr := parseStream(stdoutPipe, sink)
+	// Cancel watcher: SIGTERM + grace period + SIGKILL.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-ctx.Done():
+			_ = cmd.Process.Signal(sigterm())
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				_ = cmd.Process.Kill()
+			case <-done:
+			}
+		case <-done:
+		}
+	}()
 
-	if waitErr := cmd.Wait(); waitErr != nil && parseErr == nil {
+	streamDone := make(chan struct{})
+	var result bridle.ProviderResult
+	var parseErr error
+	go func() {
+		defer close(streamDone)
+		result, parseErr = parseStream(stdoutPipe, sink)
+	}()
+
+	waitErr := cmd.Wait()
+	<-streamDone
+
+	if waitErr != nil && parseErr == nil {
 		if ctx.Err() != nil {
 			result.StopReason = bridle.StopReasonAborted
 		} else {
+			sink.Emit(bridle.TurnError{Err: fmt.Errorf("claudecode: %w", waitErr), Stage: "subprocess_exit"})
 			return bridle.ProviderResult{}, fmt.Errorf("claudecode: CLI error: %w (stderr: %s)", waitErr, stderr.String())
 		}
+	}
+
+	// If stream ended without a result event, that's truncation.
+	if parseErr == nil && result.StopReason == "" && ctx.Err() == nil {
+		parseErr = fmt.Errorf("claudecode: stream ended without result event")
+		sink.Emit(bridle.TurnError{Err: parseErr, Stage: "stream_truncated"})
 	}
 
 	return result, parseErr
@@ -118,12 +156,13 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 		usage        bridle.Usage
 		stopReason   bridle.StopReason
 		stepCount    int
+		gotResult    bool
 	)
 
 	pendingCalls := map[string]bridle.ToolCallStart{}
 
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1 MB line buffer
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
@@ -132,11 +171,11 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 
 		var event map[string]json.RawMessage
 		if jsonErr := json.Unmarshal(line, &event); jsonErr != nil {
-			continue
+			continue // malformed line — skip, don't fail the turn
 		}
 
 		var eventType string
-		json.Unmarshal(event["type"], &eventType)
+		json.Unmarshal(event["type"], &eventType) //nolint:errcheck
 
 		switch eventType {
 		case "assistant":
@@ -158,9 +197,9 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 						sink.Emit(bridle.ModelChunk{Text: block.Text})
 						finalText += block.Text
 						sessionDelta = append(sessionDelta, bridle.SessionEvent{
-							Provider: "claude-code",
-							Role:    bridle.RoleAssistant,
-							Content: block.Text,
+							Provider: providerID,
+							Role:     bridle.RoleAssistant,
+							Content:  block.Text,
 						})
 					case "tool_use":
 						tc := bridle.ToolCallStart{ID: block.ID, Name: block.Name, Args: block.Input}
@@ -168,9 +207,9 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 						pendingCalls[block.ID] = tc
 						raw, _ := json.Marshal(block)
 						sessionDelta = append(sessionDelta, bridle.SessionEvent{
-							Provider: "claude-code",
-							Role:    bridle.RoleAssistant,
-							RawJSON: raw,
+							Provider: providerID,
+							Role:     bridle.RoleAssistant,
+							RawJSON:  raw,
 						})
 					}
 				}
@@ -208,16 +247,16 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 							sink.Emit(bridle.StepBoundary{Step: stepCount})
 						}
 						sessionDelta = append(sessionDelta, bridle.SessionEvent{
-							Provider: "claude-code",
-							Role:    bridle.RoleTool,
-							Content: block.Content,
+							Provider: providerID,
+							Role:     bridle.RoleTool,
+							Content:  block.Content,
 						})
 					}
 				}
 			}
 
 		case "result":
-			var result struct {
+			var res struct {
 				Result     string `json:"result"`
 				StopReason string `json:"stop_reason"`
 				Usage      struct {
@@ -225,13 +264,14 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 					OutputTokens int `json:"output_tokens"`
 				} `json:"usage"`
 			}
-			if jsonErr := json.Unmarshal(line, &result); jsonErr == nil {
-				if result.Result != "" && finalText == "" {
-					finalText = result.Result
+			if jsonErr := json.Unmarshal(line, &res); jsonErr == nil {
+				if res.Result != "" && finalText == "" {
+					finalText = res.Result
 				}
-				stopReason = bridle.StopReason(normalize.ClaudeStopReason(result.StopReason))
-				usage.InputTokens = result.Usage.InputTokens
-				usage.OutputTokens = result.Usage.OutputTokens
+				stopReason = bridle.StopReason(normalize.ClaudeStopReason(res.StopReason))
+				usage.InputTokens = res.Usage.InputTokens
+				usage.OutputTokens = res.Usage.OutputTokens
+				gotResult = true
 			}
 		}
 	}
@@ -240,8 +280,15 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 		return bridle.ProviderResult{}, fmt.Errorf("claudecode: stream read: %w", err)
 	}
 
-	if stopReason == "" {
-		stopReason = bridle.StopReasonModelDone
+	if !gotResult {
+		// Leave StopReason empty so RunTurn can detect stream_truncated.
+		return bridle.ProviderResult{
+			FinalText:    finalText,
+			ToolCalls:    toolCalls,
+			StepCount:    stepCount,
+			Usage:        usage,
+			SessionDelta: sessionDelta,
+		}, nil
 	}
 
 	return bridle.ProviderResult{
