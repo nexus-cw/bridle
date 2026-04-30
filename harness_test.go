@@ -336,6 +336,43 @@ func TestRunTurn_PanicRecovery(t *testing.T) {
 	}
 }
 
+// --- subprocess-stream provider capability advertisement ---
+
+func TestSubprocessProvider_CapabilityAdvertisement(t *testing.T) {
+	p := fake.NewSubprocessProvider()
+	caps := p.Capabilities()
+	if caps.Category != bridle.CategorySubprocessStream {
+		t.Errorf("Category = %q; want subprocess-stream", caps.Category)
+	}
+	if caps.SupportsBeforeToolCall {
+		t.Error("SupportsBeforeToolCall should be false for subprocess-stream")
+	}
+	if !caps.SupportsAfterToolCall {
+		t.Error("SupportsAfterToolCall should be true for subprocess-stream")
+	}
+}
+
+// TestSubprocessProvider_TextTurn verifies a text-only turn through the
+// subprocess fake emits the right events.
+func TestSubprocessProvider_TextTurn(t *testing.T) {
+	p := fake.NewSubprocessProvider(fake.SubprocessStep{Text: "subprocess result"})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Model:       "fake-model",
+		UserMessage: "test",
+	}, fake.NewToolRunner(nil), sink)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FinalText != "subprocess result" {
+		t.Errorf("FinalText = %q; want 'subprocess result'", result.FinalText)
+	}
+	assertEventOrder(t, sink.Events, "ModelChunk", "TurnDone")
+}
+
 // --- Model required ---
 
 func TestRunTurn_ModelRequired(t *testing.T) {
