@@ -1,0 +1,385 @@
+package bridle_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+
+	bridle "github.com/nexus-cw/bridle"
+	"github.com/nexus-cw/bridle/fake"
+)
+
+// --- helpers ---
+
+func toolDef(name string) bridle.ToolDef {
+	return bridle.ToolDef{
+		Name:        name,
+		Description: name,
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+	}
+}
+
+func inv(id, name string) bridle.ToolInvocation {
+	return bridle.ToolInvocation{ID: id, Name: name, Args: json.RawMessage(`{}`)}
+}
+
+func rawJSON(s string) json.RawMessage { return json.RawMessage(s) }
+
+// --- basic turn: no tools ---
+
+func TestRunTurn_NoTools(t *testing.T) {
+	p := fake.NewProvider(fake.Step{Text: "hello"})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		UserMessage: "hi",
+	}, fake.NewToolRunner(nil), sink)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FinalText != "hello" {
+		t.Errorf("FinalText = %q; want %q", result.FinalText, "hello")
+	}
+	if result.StopReason != bridle.StopReasonModelDone {
+		t.Errorf("StopReason = %q; want model_done", result.StopReason)
+	}
+
+	assertEventOrder(t, sink.Events, "ModelChunk", "TurnDone")
+}
+
+// --- tool call round-trip ---
+
+func TestRunTurn_OneToolCall(t *testing.T) {
+	toolStep := fake.Step{
+		ToolCalls: []bridle.ToolInvocation{inv("1", "echo")},
+	}
+	finalStep := fake.Step{Text: "done"}
+
+	p := fake.NewProvider(toolStep, finalStep)
+	runner := fake.NewToolRunner(map[string][]fake.ToolResult{
+		"echo": {{Result: rawJSON(`"echoed"`)}},
+	})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Tools:    []bridle.ToolDef{toolDef("echo")},
+		MaxSteps: 5,
+	}, runner, sink)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.ToolCalls) != 1 {
+		t.Errorf("ToolCalls len = %d; want 1", len(result.ToolCalls))
+	}
+	if result.ToolCalls[0].Name != "echo" {
+		t.Errorf("ToolCalls[0].Name = %q; want echo", result.ToolCalls[0].Name)
+	}
+	if result.StepCount != 1 {
+		t.Errorf("StepCount = %d; want 1", result.StepCount)
+	}
+
+	assertEventOrder(t, sink.Events,
+		"ToolCallStart", "ToolCallResult", "StepBoundary", "ModelChunk", "TurnDone")
+}
+
+// --- MaxSteps cap ---
+
+func TestRunTurn_MaxSteps(t *testing.T) {
+	// Provider always returns a tool call; MaxSteps=2 should cap it.
+	steps := make([]fake.Step, 5)
+	for i := range steps {
+		steps[i] = fake.Step{ToolCalls: []bridle.ToolInvocation{inv("x", "noop")}}
+	}
+	p := fake.NewProvider(steps...)
+	runner := fake.NewToolRunner(map[string][]fake.ToolResult{
+		"noop": {{Result: rawJSON(`null`)}},
+	})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		MaxSteps: 2,
+	}, runner, sink)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.StopReason != bridle.StopReasonMaxSteps {
+		t.Errorf("StopReason = %q; want max_steps", result.StopReason)
+	}
+	if result.StepCount != 2 {
+		t.Errorf("StepCount = %d; want 2", result.StepCount)
+	}
+}
+
+// --- cancellation ---
+
+func TestRunTurn_CancelBeforeStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before RunTurn
+
+	p := fake.NewProvider(fake.Step{Text: "should not emit"})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, _ := h.RunTurn(ctx, bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+
+	if result.StopReason != bridle.StopReasonAborted {
+		t.Errorf("StopReason = %q; want aborted", result.StopReason)
+	}
+}
+
+func TestRunTurn_CancelMidTool(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Runner cancels the context when called.
+	cancelRunner := &cancelOnRunToolRunner{cancel: cancel, result: rawJSON(`"ok"`)}
+
+	p := fake.NewProvider(
+		fake.Step{ToolCalls: []bridle.ToolInvocation{inv("1", "slow")}},
+		fake.Step{Text: "never"},
+	)
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, _ := h.RunTurn(ctx, bridle.TurnRequest{MaxSteps: 5}, cancelRunner, sink)
+
+	if result.StopReason != bridle.StopReasonAborted {
+		t.Errorf("StopReason = %q; want aborted", result.StopReason)
+	}
+}
+
+// --- hook ordering ---
+
+func TestHooks_BeforeModelCallFires(t *testing.T) {
+	var fired []string
+	p := fake.NewProvider(fake.Step{Text: "ok"})
+	h := bridle.NewHarness(p)
+	h.RegisterBeforeModelCall(func(ctx context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+		fired = append(fired, "bmc")
+		return in, bridle.HookContinue, nil
+	})
+	sink := &fake.SliceEventSink{}
+	h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+
+	if len(fired) != 1 || fired[0] != "bmc" {
+		t.Errorf("fired = %v; want [bmc]", fired)
+	}
+}
+
+func TestHooks_BeforeModelCallAborts(t *testing.T) {
+	p := fake.NewProvider(fake.Step{Text: "should not see this"})
+	h := bridle.NewHarness(p)
+	h.RegisterBeforeModelCall(func(ctx context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+		return in, bridle.HookAbort, nil
+	})
+	sink := &fake.SliceEventSink{}
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result.StopReason != bridle.StopReasonAborted {
+		t.Errorf("StopReason = %q; want aborted", result.StopReason)
+	}
+	// No events should have been emitted.
+	if len(sink.Events) != 0 {
+		t.Errorf("events emitted = %d; want 0", len(sink.Events))
+	}
+}
+
+func TestHooks_BeforeToolCallAborts(t *testing.T) {
+	p := fake.NewProvider(
+		fake.Step{ToolCalls: []bridle.ToolInvocation{inv("1", "echo")}},
+		fake.Step{Text: "never"},
+	)
+	h := bridle.NewHarness(p)
+	h.RegisterBeforeToolCall(func(ctx context.Context, in bridle.BeforeToolCallCtx) (bridle.BeforeToolCallCtx, bridle.HookAction, error) {
+		return in, bridle.HookAbort, nil
+	})
+	runner := fake.NewToolRunner(map[string][]fake.ToolResult{
+		"echo": {{Result: rawJSON(`"ok"`)}},
+	})
+	sink := &fake.SliceEventSink{}
+	result, _ := h.RunTurn(context.Background(), bridle.TurnRequest{MaxSteps: 5}, runner, sink)
+
+	if result.StopReason != bridle.StopReasonAborted {
+		t.Errorf("StopReason = %q; want aborted", result.StopReason)
+	}
+}
+
+func TestHooks_OnTurnDoneCanMutateSessionDelta(t *testing.T) {
+	p := fake.NewProvider(fake.Step{Text: "result"})
+	h := bridle.NewHarness(p)
+	h.RegisterOnTurnDone(func(ctx context.Context, in bridle.OnTurnDoneCtx) (bridle.OnTurnDoneCtx, bridle.HookAction, error) {
+		in.Result.SessionDelta = append(in.Result.SessionDelta, bridle.SessionEvent{
+			Role:    bridle.RoleSystem,
+			Content: "hook-injected",
+		})
+		return in, bridle.HookContinue, nil
+	})
+	sink := &fake.SliceEventSink{}
+	result, _ := h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+
+	last := result.SessionDelta[len(result.SessionDelta)-1]
+	if last.Content != "hook-injected" {
+		t.Errorf("last session delta = %q; want hook-injected", last.Content)
+	}
+}
+
+func TestHooks_RegistrationOrder(t *testing.T) {
+	var order []int
+	p := fake.NewProvider(fake.Step{Text: "ok"})
+	h := bridle.NewHarness(p)
+	for i := 0; i < 3; i++ {
+		i := i
+		h.RegisterBeforeModelCall(func(ctx context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+			order = append(order, i)
+			return in, bridle.HookContinue, nil
+		})
+	}
+	sink := &fake.SliceEventSink{}
+	h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+
+	if len(order) != 3 || order[0] != 0 || order[1] != 1 || order[2] != 2 {
+		t.Errorf("hook order = %v; want [0 1 2]", order)
+	}
+}
+
+// --- provider error ---
+
+func TestRunTurn_ProviderError(t *testing.T) {
+	boom := errors.New("provider boom")
+	p := fake.NewProvider(fake.Step{Err: boom})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if result.StopReason != bridle.StopReasonError {
+		t.Errorf("StopReason = %q; want error", result.StopReason)
+	}
+	// TurnError event should be in the sink.
+	found := false
+	for _, e := range sink.Events {
+		if _, ok := e.(bridle.TurnError); ok {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("TurnError event not emitted")
+	}
+}
+
+// --- tool error does not abort turn ---
+
+func TestRunTurn_ToolError_DoesNotAbortTurn(t *testing.T) {
+	p := fake.NewProvider(
+		fake.Step{ToolCalls: []bridle.ToolInvocation{inv("1", "failing")}},
+		fake.Step{Text: "recovered"},
+	)
+	runner := fake.NewToolRunner(map[string][]fake.ToolResult{
+		"failing": {{Err: errors.New("tool failed")}},
+	})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{MaxSteps: 5}, runner, sink)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Turn should complete; tool error is passed to model, not fatal.
+	if result.StopReason != bridle.StopReasonModelDone {
+		t.Errorf("StopReason = %q; want model_done", result.StopReason)
+	}
+	if result.FinalText != "recovered" {
+		t.Errorf("FinalText = %q; want recovered", result.FinalText)
+	}
+	// ToolCallResult should record the error.
+	var tcr bridle.ToolCallResult
+	for _, e := range sink.Events {
+		if r, ok := e.(bridle.ToolCallResult); ok {
+			tcr = r
+		}
+	}
+	if tcr.Err == "" {
+		t.Error("ToolCallResult.Err is empty; expected tool error string")
+	}
+}
+
+// --- panic recovery ---
+
+func TestRunTurn_PanicRecovery(t *testing.T) {
+	p := &panicProvider{}
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+
+	if err == nil {
+		t.Fatal("expected error from panic recovery")
+	}
+	if result.StopReason != bridle.StopReasonError {
+		t.Errorf("StopReason = %q; want error", result.StopReason)
+	}
+}
+
+// --- helpers ---
+
+func assertEventOrder(t *testing.T, events []bridle.Event, types ...string) {
+	t.Helper()
+	got := make([]string, 0, len(events))
+	for _, e := range events {
+		switch e.(type) {
+		case bridle.ModelChunk:
+			got = append(got, "ModelChunk")
+		case bridle.ToolCallStart:
+			got = append(got, "ToolCallStart")
+		case bridle.ToolCallResult:
+			got = append(got, "ToolCallResult")
+		case bridle.StepBoundary:
+			got = append(got, "StepBoundary")
+		case bridle.TurnDone:
+			got = append(got, "TurnDone")
+		case bridle.TurnError:
+			got = append(got, "TurnError")
+		}
+	}
+	if len(got) != len(types) {
+		t.Errorf("event sequence = %v; want %v", got, types)
+		return
+	}
+	for i, want := range types {
+		if got[i] != want {
+			t.Errorf("event[%d] = %q; want %q (full sequence: %v)", i, got[i], want, got)
+		}
+	}
+}
+
+// cancelOnRunToolRunner cancels its context when Run is called.
+type cancelOnRunToolRunner struct {
+	cancel func()
+	result json.RawMessage
+}
+
+func (r *cancelOnRunToolRunner) Run(_ context.Context, _ bridle.ToolCall) (json.RawMessage, error) {
+	r.cancel()
+	return r.result, nil
+}
+
+// panicProvider always panics inside RunTurn.
+type panicProvider struct{}
+
+func (p *panicProvider) Name() bridle.ProviderID { return "panic-fake" }
+func (p *panicProvider) RunTurn(_ context.Context, _ bridle.ProviderRequest, _ bridle.EventSink) (bridle.ProviderResult, error) {
+	panic("deliberate test panic")
+}
