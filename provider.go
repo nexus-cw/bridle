@@ -20,6 +20,7 @@ type ProviderCapabilities struct {
 	SupportsCustomTools    bool // funnel can pass arbitrary Tools via TurnRequest
 	SupportsBeforeToolCall bool // BeforeToolCall hook fires
 	SupportsAfterToolCall  bool // AfterToolCall hook fires
+	SupportsMCP            bool // provider consumes TurnRequest.MCP (direct-api only)
 }
 
 // Provider is the interface every model backend must implement.
@@ -41,6 +42,7 @@ type ProviderRequest struct {
 	Session      SessionHandle  // for subprocess-stream: resume key; for direct-api: may be empty
 	Messages     []ProviderMessage
 	Tools        []ToolDef
+	MCP          *MCPClientConfig  // nil = no MCP tools
 	MaxSteps     int
 	Model        string
 }

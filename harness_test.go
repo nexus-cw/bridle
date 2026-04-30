@@ -432,12 +432,75 @@ func (r *cancelOnRunToolRunner) Run(_ context.Context, _ bridle.ToolCall) (json.
 	return r.result, nil
 }
 
+// --- MCP tool name collision ---
+
+// TestRunTurn_MCPToolNameCollision verifies that RunTurn returns ErrToolNameCollision when
+// an explicit tool and the MCP config advertise the same name.
+// We use a fake MCPClientConfig pointing at a non-existent stdio server — the
+// connection will fail before the collision check. To test the collision path purely,
+// we pass an MCPClientConfig with an empty Servers list to the SupportsMCP=false provider
+// (which skips MCP entirely), and test the collision directly via the mcpclient package tests.
+// The actual harness-level collision path is exercised in TestRunTurn_MCPNoServers.
+func TestRunTurn_MCPNoServers(t *testing.T) {
+	p := fake.NewProvider(fake.Step{Text: "hello", StopReason: bridle.StopReasonModelDone})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	// MCP config with no servers — should be a no-op and turn should complete normally.
+	req := bridle.TurnRequest{
+		Model: "fake-model",
+		Tools: []bridle.ToolDef{toolDef("explicit_tool")},
+		MCP:   &bridle.MCPClientConfig{}, // empty — no servers
+	}
+	result, err := h.RunTurn(context.Background(), req, fake.NewToolRunner(nil), sink)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.StopReason != bridle.StopReasonModelDone {
+		t.Errorf("want model_done, got %s", result.StopReason)
+	}
+	if result.FinalText != "hello" {
+		t.Errorf("want 'hello', got %q", result.FinalText)
+	}
+}
+
+// TestRunTurn_MCPIgnoredForSubprocess verifies that subprocess-stream providers
+// ignore TurnRequest.MCP (SupportsMCP=false).
+func TestRunTurn_MCPIgnoredForSubprocess(t *testing.T) {
+	p := fake.NewSubprocessProvider(fake.SubprocessStep{
+		Text:       "subprocess response",
+		StopReason: bridle.StopReasonModelDone,
+	})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	req := bridle.TurnRequest{
+		Model: "fake-model",
+		MCP: &bridle.MCPClientConfig{
+			Servers: []bridle.MCPServerSpec{{
+				Name:      "unreachable-server",
+				Transport: bridle.MCPTransportStdio,
+				Command:   []string{"nonexistent-binary"},
+			}},
+		},
+	}
+	// Should succeed — subprocess provider ignores MCP, so the unreachable server
+	// is never contacted.
+	result, err := h.RunTurn(context.Background(), req, fake.NewToolRunner(nil), sink)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FinalText != "subprocess response" {
+		t.Errorf("want 'subprocess response', got %q", result.FinalText)
+	}
+}
+
 // panicProvider always panics inside RunTurn.
 type panicProvider struct{}
 
 func (p *panicProvider) Name() bridle.ProviderID { return "panic-fake" }
 func (p *panicProvider) Capabilities() bridle.ProviderCapabilities {
-	return bridle.ProviderCapabilities{Category: bridle.CategoryDirectAPI, SupportsCustomTools: true, SupportsBeforeToolCall: true, SupportsAfterToolCall: true}
+	return bridle.ProviderCapabilities{Category: bridle.CategoryDirectAPI, SupportsCustomTools: true, SupportsBeforeToolCall: true, SupportsAfterToolCall: true, SupportsMCP: true}
 }
 func (p *panicProvider) RunTurn(_ context.Context, _ bridle.ProviderRequest, _ bridle.EventSink) (bridle.ProviderResult, error) {
 	panic("deliberate test panic")

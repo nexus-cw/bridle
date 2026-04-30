@@ -5,10 +5,32 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/nexus-cw/bridle/internal/mcpclient"
 )
 
 // runTurn is the inner implementation, called by RunTurn after the panic trap.
 func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunner, sink EventSink) (TurnResult, error) {
+	// Connect MCP servers and merge tool surface (direct-api providers only).
+	var mcpClient *mcpclient.Client
+	caps := h.provider.Capabilities()
+	if caps.SupportsMCP && req.MCP != nil {
+		specs := lowerMCPConfig(req.MCP)
+		var err error
+		mcpClient, err = mcpclient.Connect(ctx, specs)
+		if err != nil {
+			return TurnResult{StopReason: StopReasonError}, err
+		}
+		defer mcpClient.Close()
+
+		mcpTools := mcpClient.Tools()
+		merged, err := mergeToolSurface(req.Tools, mcpTools)
+		if err != nil {
+			return TurnResult{StopReason: StopReasonError}, err
+		}
+		req.Tools = merged
+	}
+
 	// Lower TurnRequest → ProviderRequest.
 	preq := lowerRequest(req)
 
@@ -83,7 +105,13 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 			}
 
-			resultJSON, runErr := runner.Run(ctx, call)
+			var resultJSON json.RawMessage
+			var runErr error
+			if mcpClient != nil && mcpClient.IsMCPTool(call.Name) {
+				resultJSON, runErr = mcpClient.Call(ctx, call.Name, call.Args)
+			} else {
+				resultJSON, runErr = runner.Run(ctx, call)
+			}
 			var toolErrStr string
 			if runErr != nil {
 				toolErrStr = runErr.Error()
@@ -202,6 +230,7 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 		Session:      req.Session,
 		Messages:     messages,
 		Tools:        req.Tools,
+		MCP:          req.MCP,
 		MaxSteps:     req.MaxSteps,
 		Model:        req.Model,
 	}
@@ -234,4 +263,46 @@ func panicErr(r any) error {
 		return err
 	}
 	return errors.New(fmt.Sprintf("panic: %v", r))
+}
+
+// lowerMCPConfig converts a bridle MCPClientConfig to the internal mcpclient ServerSpec slice.
+func lowerMCPConfig(cfg *MCPClientConfig) []mcpclient.ServerSpec {
+	if cfg == nil {
+		return nil
+	}
+	specs := make([]mcpclient.ServerSpec, 0, len(cfg.Servers))
+	for _, s := range cfg.Servers {
+		specs = append(specs, mcpclient.ServerSpec{
+			Name:      s.Name,
+			Transport: mcpclient.Transport(s.Transport),
+			Command:   s.Command,
+			URL:       s.URL,
+			Env:       s.Env,
+			Header:    s.Header,
+		})
+	}
+	return specs
+}
+
+// mergeToolSurface merges explicit ToolDefs with MCP-loaded ToolDefs, checking
+// for name collisions. Returns ErrToolNameCollision on a duplicate name.
+func mergeToolSurface(explicit []ToolDef, mcpTools []mcpclient.ToolDef) ([]ToolDef, error) {
+	seen := make(map[string]struct{}, len(explicit))
+	for _, t := range explicit {
+		seen[t.Name] = struct{}{}
+	}
+	merged := make([]ToolDef, len(explicit), len(explicit)+len(mcpTools))
+	copy(merged, explicit)
+	for _, t := range mcpTools {
+		if _, dup := seen[t.Name]; dup {
+			return nil, ErrToolNameCollision
+		}
+		seen[t.Name] = struct{}{}
+		merged = append(merged, ToolDef{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: t.InputSchema,
+		})
+	}
+	return merged, nil
 }

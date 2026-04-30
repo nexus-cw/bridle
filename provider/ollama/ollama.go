@@ -45,6 +45,7 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 		SupportsCustomTools:    true,
 		SupportsBeforeToolCall: true,
 		SupportsAfterToolCall:  true,
+		SupportsMCP:            true,
 	}
 }
 

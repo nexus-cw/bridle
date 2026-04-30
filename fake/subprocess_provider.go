@@ -42,6 +42,7 @@ func (p *SubprocessProvider) Capabilities() bridle.ProviderCapabilities {
 		SupportsCustomTools:    false,
 		SupportsBeforeToolCall: false,
 		SupportsAfterToolCall:  true,
+		SupportsMCP:            false,
 	}
 }
 

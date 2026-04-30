@@ -66,7 +66,8 @@ type TurnRequest struct {
 	Inbox       []InboxItem // mid-turn comms accumulated since last turn
 
 	// Tool surface
-	Tools []ToolDef // tools the model may call this turn
+	Tools []ToolDef         // explicit in-process tool defs
+	MCP   *MCPClientConfig  // MCP-loaded tools; nil = no MCP tools this turn
 
 	// Provider
 	Provider ProviderID // claude-api | ollama-local | openai-api | claude-code
