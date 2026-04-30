@@ -48,6 +48,15 @@ func New() *Provider {
 
 func (p *Provider) Name() bridle.ProviderID { return "claude-code" }
 
+func (p *Provider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{
+		Category:               bridle.CategorySubprocessStream,
+		SupportsCustomTools:    false,
+		SupportsBeforeToolCall: false,
+		SupportsAfterToolCall:  true,
+	}
+}
+
 // RunTurn invokes the claude CLI and streams its output as bridle events.
 // Tool calls made by the model are executed by the CLI itself; the bridle
 // ToolRunner is NOT called on this path (see package doc).

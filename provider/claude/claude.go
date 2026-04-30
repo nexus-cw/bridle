@@ -32,6 +32,15 @@ func NewWithClient(client *anthropic.Client) *Provider {
 
 func (p *Provider) Name() bridle.ProviderID { return bridle.ProviderClaude }
 
+func (p *Provider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{
+		Category:               bridle.CategoryDirectAPI,
+		SupportsCustomTools:    true,
+		SupportsBeforeToolCall: true,
+		SupportsAfterToolCall:  true,
+	}
+}
+
 func (p *Provider) getClient() *anthropic.Client {
 	if p.client != nil {
 		return p.client

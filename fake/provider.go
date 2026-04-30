@@ -34,6 +34,15 @@ func NewProvider(steps ...Step) *Provider {
 
 func (p *Provider) Name() bridle.ProviderID { return "fake" }
 
+func (p *Provider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{
+		Category:               bridle.CategoryDirectAPI,
+		SupportsCustomTools:    true,
+		SupportsBeforeToolCall: true,
+		SupportsAfterToolCall:  true,
+	}
+}
+
 // RunTurn pops the next scripted step and emits its events to sink.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	if p.pos >= len(p.steps) {

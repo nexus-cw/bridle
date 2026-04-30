@@ -39,6 +39,15 @@ func NewWithClient(client *api.Client) *Provider {
 
 func (p *Provider) Name() bridle.ProviderID { return bridle.ProviderOllama }
 
+func (p *Provider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{
+		Category:               bridle.CategoryDirectAPI,
+		SupportsCustomTools:    true,
+		SupportsBeforeToolCall: true,
+		SupportsAfterToolCall:  true,
+	}
+}
+
 func (p *Provider) getClient() (*api.Client, error) {
 	if p.client != nil {
 		return p.client, nil

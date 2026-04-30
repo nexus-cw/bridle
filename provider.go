@@ -2,11 +2,32 @@ package bridle
 
 import "context"
 
+// ProviderCategory classifies how a provider executes tool calls.
+type ProviderCategory string
+
+const (
+	// CategoryDirectAPI — provider talks directly to a model API; bridle owns the tool loop.
+	CategoryDirectAPI ProviderCategory = "direct-api"
+	// CategorySubprocessStream — provider spawns a subprocess that runs its own agentic loop
+	// and emits a structured event stream. The subprocess owns tool execution.
+	CategorySubprocessStream ProviderCategory = "subprocess-stream"
+)
+
+// ProviderCapabilities advertises what a provider supports so the harness
+// and funnel can route turns correctly.
+type ProviderCapabilities struct {
+	Category               ProviderCategory
+	SupportsCustomTools    bool // funnel can pass arbitrary Tools via TurnRequest
+	SupportsBeforeToolCall bool // BeforeToolCall hook fires
+	SupportsAfterToolCall  bool // AfterToolCall hook fires
+}
+
 // Provider is the interface every model backend must implement.
 // Provider-specific weirdness (streaming, wire format, tool-schema translation)
 // stays inside the implementation; the harness sees a uniform event stream.
 type Provider interface {
 	Name() ProviderID
+	Capabilities() ProviderCapabilities
 	RunTurn(ctx context.Context, req ProviderRequest, sink EventSink) (ProviderResult, error)
 }
 

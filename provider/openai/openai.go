@@ -33,6 +33,15 @@ func NewWithClient(client *openai.Client) *Provider {
 
 func (p *Provider) Name() bridle.ProviderID { return bridle.ProviderOpenAI }
 
+func (p *Provider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{
+		Category:               bridle.CategoryDirectAPI,
+		SupportsCustomTools:    true,
+		SupportsBeforeToolCall: true,
+		SupportsAfterToolCall:  true,
+	}
+}
+
 func (p *Provider) getClient() *openai.Client {
 	if p.client != nil {
 		return p.client

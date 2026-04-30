@@ -380,6 +380,9 @@ func (r *cancelOnRunToolRunner) Run(_ context.Context, _ bridle.ToolCall) (json.
 type panicProvider struct{}
 
 func (p *panicProvider) Name() bridle.ProviderID { return "panic-fake" }
+func (p *panicProvider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{Category: bridle.CategoryDirectAPI, SupportsCustomTools: true, SupportsBeforeToolCall: true, SupportsAfterToolCall: true}
+}
 func (p *panicProvider) RunTurn(_ context.Context, _ bridle.ProviderRequest, _ bridle.EventSink) (bridle.ProviderResult, error) {
 	panic("deliberate test panic")
 }
