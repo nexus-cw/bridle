@@ -12,16 +12,22 @@ const (
 	RoleSystem    SessionRole = "system"
 )
 
-// SessionEvent is a single entry in the funnel-owned JSONL session.
+// SessionHandle is an opaque reference to provider-side session state.
+// The funnel mints handles and maps them to threads; the provider uses the
+// ID to resume state (e.g., --resume <session-id> for subprocess-stream).
+// For direct-api providers, Handle may be empty; state comes from SessionTail.
+type SessionHandle struct {
+	ID string // opaque to the funnel; meaningful to the provider
+}
+
+// SessionEvent is a single entry in a session's event log.
 // The harness consumes SessionTail on the way in and proposes SessionDelta
-// on the way out; the funnel is the sole writer to the JSONL file.
-//
-// Shape is intentionally minimal for v0.1. It will align with the funnel's
-// full JSONL format when that schema is defined.
+// on the way out.
 type SessionEvent struct {
-	Role    SessionRole     `json:"role"`
-	Content string          `json:"content,omitempty"`
+	Provider ProviderID      `json:"provider,omitempty"` // who produced this event
+	Role     SessionRole     `json:"role"`
+	Content  string          `json:"content,omitempty"`
 	// RawJSON carries provider-specific blocks (tool_use, tool_result, etc.)
-	// that don't fit the plain content field.
+	// that don't fit the plain content field. Valid only in conjunction with Provider.
 	RawJSON json.RawMessage `json:"raw,omitempty"`
 }

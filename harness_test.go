@@ -34,6 +34,7 @@ func TestRunTurn_NoTools(t *testing.T) {
 	sink := &fake.SliceEventSink{}
 
 	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Model:       "fake-model",
 		UserMessage: "hi",
 	}, fake.NewToolRunner(nil), sink)
 
@@ -66,6 +67,7 @@ func TestRunTurn_OneToolCall(t *testing.T) {
 	sink := &fake.SliceEventSink{}
 
 	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Model:    "fake-model",
 		Tools:    []bridle.ToolDef{toolDef("echo")},
 		MaxSteps: 5,
 	}, runner, sink)
@@ -103,6 +105,7 @@ func TestRunTurn_MaxSteps(t *testing.T) {
 	sink := &fake.SliceEventSink{}
 
 	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Model:    "fake-model",
 		MaxSteps: 2,
 	}, runner, sink)
 
@@ -127,7 +130,7 @@ func TestRunTurn_CancelBeforeStart(t *testing.T) {
 	h := bridle.NewHarness(p)
 	sink := &fake.SliceEventSink{}
 
-	result, _ := h.RunTurn(ctx, bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+	result, _ := h.RunTurn(ctx, bridle.TurnRequest{Model: "fake-model"}, fake.NewToolRunner(nil), sink)
 
 	if result.StopReason != bridle.StopReasonAborted {
 		t.Errorf("StopReason = %q; want aborted", result.StopReason)
@@ -147,7 +150,7 @@ func TestRunTurn_CancelMidTool(t *testing.T) {
 	h := bridle.NewHarness(p)
 	sink := &fake.SliceEventSink{}
 
-	result, _ := h.RunTurn(ctx, bridle.TurnRequest{MaxSteps: 5}, cancelRunner, sink)
+	result, _ := h.RunTurn(ctx, bridle.TurnRequest{Model: "fake-model", MaxSteps: 5}, cancelRunner, sink)
 
 	if result.StopReason != bridle.StopReasonAborted {
 		t.Errorf("StopReason = %q; want aborted", result.StopReason)
@@ -165,7 +168,7 @@ func TestHooks_BeforeModelCallFires(t *testing.T) {
 		return in, bridle.HookContinue, nil
 	})
 	sink := &fake.SliceEventSink{}
-	h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+	h.RunTurn(context.Background(), bridle.TurnRequest{Model: "fake-model"}, fake.NewToolRunner(nil), sink)
 
 	if len(fired) != 1 || fired[0] != "bmc" {
 		t.Errorf("fired = %v; want [bmc]", fired)
@@ -179,7 +182,7 @@ func TestHooks_BeforeModelCallAborts(t *testing.T) {
 		return in, bridle.HookAbort, nil
 	})
 	sink := &fake.SliceEventSink{}
-	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{Model: "fake-model"}, fake.NewToolRunner(nil), sink)
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -206,7 +209,7 @@ func TestHooks_BeforeToolCallAborts(t *testing.T) {
 		"echo": {{Result: rawJSON(`"ok"`)}},
 	})
 	sink := &fake.SliceEventSink{}
-	result, _ := h.RunTurn(context.Background(), bridle.TurnRequest{MaxSteps: 5}, runner, sink)
+	result, _ := h.RunTurn(context.Background(), bridle.TurnRequest{Model: "fake-model", MaxSteps: 5}, runner, sink)
 
 	if result.StopReason != bridle.StopReasonAborted {
 		t.Errorf("StopReason = %q; want aborted", result.StopReason)
@@ -224,7 +227,7 @@ func TestHooks_OnTurnDoneCanMutateSessionDelta(t *testing.T) {
 		return in, bridle.HookContinue, nil
 	})
 	sink := &fake.SliceEventSink{}
-	result, _ := h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+	result, _ := h.RunTurn(context.Background(), bridle.TurnRequest{Model: "fake-model"}, fake.NewToolRunner(nil), sink)
 
 	last := result.SessionDelta[len(result.SessionDelta)-1]
 	if last.Content != "hook-injected" {
@@ -244,7 +247,7 @@ func TestHooks_RegistrationOrder(t *testing.T) {
 		})
 	}
 	sink := &fake.SliceEventSink{}
-	h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+	h.RunTurn(context.Background(), bridle.TurnRequest{Model: "fake-model"}, fake.NewToolRunner(nil), sink)
 
 	if len(order) != 3 || order[0] != 0 || order[1] != 1 || order[2] != 2 {
 		t.Errorf("hook order = %v; want [0 1 2]", order)
@@ -259,7 +262,7 @@ func TestRunTurn_ProviderError(t *testing.T) {
 	h := bridle.NewHarness(p)
 	sink := &fake.SliceEventSink{}
 
-	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{Model: "fake-model"}, fake.NewToolRunner(nil), sink)
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -292,7 +295,7 @@ func TestRunTurn_ToolError_DoesNotAbortTurn(t *testing.T) {
 	h := bridle.NewHarness(p)
 	sink := &fake.SliceEventSink{}
 
-	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{MaxSteps: 5}, runner, sink)
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{Model: "fake-model", MaxSteps: 5}, runner, sink)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -323,13 +326,29 @@ func TestRunTurn_PanicRecovery(t *testing.T) {
 	h := bridle.NewHarness(p)
 	sink := &fake.SliceEventSink{}
 
-	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{Model: "fake-model"}, fake.NewToolRunner(nil), sink)
 
 	if err == nil {
 		t.Fatal("expected error from panic recovery")
 	}
 	if result.StopReason != bridle.StopReasonError {
 		t.Errorf("StopReason = %q; want error", result.StopReason)
+	}
+}
+
+// --- Model required ---
+
+func TestRunTurn_ModelRequired(t *testing.T) {
+	p := fake.NewProvider(fake.Step{Text: "ok"})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	_, err := h.RunTurn(context.Background(), bridle.TurnRequest{}, fake.NewToolRunner(nil), sink)
+	if err == nil {
+		t.Fatal("expected ErrModelRequired, got nil")
+	}
+	if !errors.Is(err, bridle.ErrModelRequired) {
+		t.Errorf("err = %v; want ErrModelRequired", err)
 	}
 }
 

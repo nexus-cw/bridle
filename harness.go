@@ -3,7 +3,11 @@ package bridle
 import (
 	"context"
 	"encoding/json"
+	"errors"
 )
+
+// ErrModelRequired is returned by RunTurn when TurnRequest.Model is empty.
+var ErrModelRequired = errors.New("bridle: TurnRequest.Model is required")
 
 // ProviderID identifies a model provider.
 type ProviderID string
@@ -54,7 +58,8 @@ type TurnRequest struct {
 	// Identity & framing
 	AspectID     string         // who's running (cost/triage/identity attribution)
 	SystemPrompt string         // composed by funnel: NEXUS.md + SOUL.md + PRIMER + harness rules
-	SessionTail  []SessionEvent // funnel-owned JSONL fragment to seed model context
+	Session      SessionHandle  // opaque handle for provider-side state (subprocess-stream: resume key)
+	SessionTail  []SessionEvent // recent events for direct-api providers to lower into the request
 
 	// This turn
 	UserMessage string      // the prompt that opens this turn (may be empty for autonomous)
@@ -64,8 +69,8 @@ type TurnRequest struct {
 	Tools []ToolDef // tools the model may call this turn
 
 	// Provider
-	Provider ProviderID // claude-api | ollama-local | openai-api
-	Model    string     // provider-specific model id
+	Provider ProviderID // claude-api | ollama-local | openai-api | claude-code
+	Model    string     // REQUIRED — provider-specific model id; RunTurn returns ErrModelRequired if empty
 	MaxSteps int        // hard cap on tool-call rounds; 0 = unlimited
 }
 
@@ -98,7 +103,11 @@ func NewHarness(p Provider) *Harness {
 // RunTurn drives one turn: calls the provider, executes tool calls via runner,
 // fires hooks at documented points, and emits events to sink.
 // Cancellation via ctx returns a partial TurnResult with StopReason=aborted.
+// Returns ErrModelRequired if req.Model is empty.
 func (h *Harness) RunTurn(ctx context.Context, req TurnRequest, runner ToolRunner, sink EventSink) (result TurnResult, err error) {
+	if req.Model == "" {
+		return TurnResult{StopReason: StopReasonError}, ErrModelRequired
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			e := panicErr(r)
