@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 
 	"github.com/ollama/ollama/api"
@@ -46,7 +47,7 @@ func (p *Provider) getClient() (*api.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ollama: invalid base URL %q: %w", p.baseURL, err)
 	}
-	client := api.NewClient(u, nil)
+	client := api.NewClient(u, http.DefaultClient)
 	p.client = client
 	return client, nil
 }
