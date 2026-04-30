@@ -1,4 +1,4 @@
-// Package stubfunnel is a temporary validation harness for bridle v0.1.
+// Package stubfunnel is a temporary validation harness for bridle v0.1/patch1.
 //
 // It is NOT the funnel. It exists solely to exercise bridle's contract under a
 // realistic funnel-shaped caller — deliberation loop, inbox folding, send_comms
@@ -11,6 +11,7 @@
 // Usage:
 //
 //	go run ./stubfunnel/ -provider claude -prompt "what time is it?"
+//	go run ./stubfunnel/ -provider claudeapi -prompt "what time is it?"
 //	go run ./stubfunnel/ -provider ollama  -model llama3.2:3b -prompt "what time is it?"
 package main
 
@@ -24,13 +25,14 @@ import (
 	"time"
 
 	bridle "github.com/nexus-cw/bridle"
+	claudeapi "github.com/nexus-cw/bridle/provider/claude"
 	"github.com/nexus-cw/bridle/provider/claudecode"
 	"github.com/nexus-cw/bridle/provider/ollama"
 )
 
 func main() {
-	providerFlag := flag.String("provider", "claude", "provider: claude | ollama")
-	modelFlag := flag.String("model", "", "model id (default: claude-opus-4-7 for claude, llama3.2:3b for ollama)")
+	providerFlag := flag.String("provider", "claude", "provider: claude | claudeapi | ollama")
+	modelFlag := flag.String("model", "", "model id (default per-provider)")
 	promptFlag := flag.String("prompt", "What time is it? Use the now tool.", "user prompt for the deliberation turn")
 	maxStepsFlag := flag.Int("max-steps", 5, "max tool-call rounds per turn")
 	maxTurnsFlag := flag.Int("max-turns", 3, "max deliberation turns before giving up")
@@ -45,9 +47,13 @@ func main() {
 	switch *providerFlag {
 	case "claude":
 		p := claudecode.New()
-		// Restrict CLI to no native tools — custom bridle tools can't be injected
-		// into the CLI subprocess anyway (see spec-mismatch note in provider/claudecode).
 		p.AllowedTools = []string{"none"}
+		if model == "" {
+			model = "claude-haiku-4-5-20251001"
+		}
+		provider = p
+	case "claudeapi":
+		p := claudeapi.New("")
 		if model == "" {
 			model = "claude-haiku-4-5-20251001"
 		}
@@ -58,11 +64,13 @@ func main() {
 			model = "llama3.2:3b"
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "unknown provider %q (want: claude | ollama)\n", *providerFlag)
+		fmt.Fprintf(os.Stderr, "unknown provider %q (want: claude | claudeapi | ollama)\n", *providerFlag)
 		os.Exit(1)
 	}
 
-	fmt.Printf("[stubfunnel] provider=%s model=%s\n", *providerFlag, model)
+	caps := provider.Capabilities()
+	fmt.Printf("[stubfunnel] provider=%s model=%s category=%s custom-tools=%v before-tool-call=%v\n",
+		*providerFlag, model, caps.Category, caps.SupportsCustomTools, caps.SupportsBeforeToolCall)
 
 	// Session JSONL — funnel owns the file; harness only reads/proposes.
 	sessionPath := *sessionFileFlag
