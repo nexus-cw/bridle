@@ -43,6 +43,23 @@ func GeminiStopReason(raw string) string {
 	}
 }
 
+// BedrockStopReason maps AWS Bedrock Converse stop_reason strings to bridle StopReason values.
+func BedrockStopReason(raw string) string {
+	switch raw {
+	case "end_turn", "stop_sequence":
+		return "model_done"
+	case "max_tokens":
+		return "max_steps"
+	case "tool_use":
+		// non-terminal in bridle — caller manages the tool loop
+		return "model_done"
+	case "guardrail_intervened", "content_filtered":
+		return "error"
+	default:
+		return "model_done"
+	}
+}
+
 // OllamaStopReason maps Ollama done_reason strings to bridle StopReason values.
 func OllamaStopReason(raw string) string {
 	switch raw {
