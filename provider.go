@@ -48,10 +48,21 @@ type ProviderRequest struct {
 }
 
 // ProviderMessage is a single exchange entry in provider-agnostic form.
+//
+// For Role == "tool_result", both ToolCallID and ToolName must be set.
+// ToolCallID is the call instance identifier the assistant emitted (used
+// to correlate this result with that specific invocation). ToolName is
+// the function-declaration name that was called (e.g. "send_chat") —
+// some providers (Gemini's FunctionResponse) require it to be present
+// alongside the call id, because their wire format keys responses by
+// declaration name, not by call id. Providers that key only by call id
+// (Anthropic, OpenAI, Ollama) ignore ToolName and the field can be left
+// empty without harm.
 type ProviderMessage struct {
-	Role string // "user" | "assistant" | "tool_result" | "system"
+	Role       string // "user" | "assistant" | "tool_result" | "system"
 	Content    string
 	ToolCallID string // links a tool_result back to the call that produced it
+	ToolName   string // function-declaration name; required for tool_result on Gemini
 }
 
 // ProviderResult is the harness-internal result from one provider turn step.

@@ -75,14 +75,25 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	// Allowed tools: per-turn list from the funnel (req.Tools.Name) takes
 	// precedence; fall back to the provider-level default. The CLI owns
 	// execution, so the funnel sets the *allowlist*, not the schemas.
+	//
+	// Guard: a non-empty req.Tools with all-empty Name fields would
+	// otherwise translate to allowed=[] and silently drop the
+	// --allowedTools flag, letting the CLI run with the full default
+	// allowlist. That's a footgun (silent privilege escalation), so on
+	// degenerate input we fall back to p.AllowedTools rather than the
+	// "no flag at all" path.
 	allowed := p.AllowedTools
 	if len(req.Tools) > 0 {
-		allowed = make([]string, 0, len(req.Tools))
+		perTurn := make([]string, 0, len(req.Tools))
 		for _, t := range req.Tools {
 			if t.Name != "" {
-				allowed = append(allowed, t.Name)
+				perTurn = append(perTurn, t.Name)
 			}
 		}
+		if len(perTurn) > 0 {
+			allowed = perTurn
+		}
+		// else: req.Tools had nothing usable; fall through to p.AllowedTools.
 	}
 	if len(allowed) > 0 {
 		args = append(args, "--allowedTools", strings.Join(allowed, ","))
@@ -114,9 +125,16 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	}
 
 	// Cancel watcher: SIGTERM + grace period + SIGKILL.
-	done := make(chan struct{})
+	//
+	// procExited is closed AFTER cmd.Wait() returns (see below). The
+	// watcher waits on either ctx cancellation OR the process exiting
+	// naturally; on cancellation it sends SIGTERM and waits up to the
+	// grace period for procExited before SIGKILLing. Without procExited
+	// being closed externally, the watcher would (a) leak on natural
+	// exit and (b) always SIGKILL after the full grace period even when
+	// the process already responded to SIGTERM.
+	procExited := make(chan struct{})
 	go func() {
-		defer close(done)
 		select {
 		case <-ctx.Done():
 			_ = cmd.Process.Signal(sigterm())
@@ -125,9 +143,11 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 			select {
 			case <-timer.C:
 				_ = cmd.Process.Kill()
-			case <-done:
+			case <-procExited:
+				// Process exited cleanly during grace period — no SIGKILL needed.
 			}
-		case <-done:
+		case <-procExited:
+			// Natural exit — nothing to do.
 		}
 	}()
 
@@ -140,6 +160,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	}()
 
 	waitErr := cmd.Wait()
+	close(procExited) // signal the cancel watcher that the process is gone
 	<-streamDone
 
 	if waitErr != nil && parseErr == nil {

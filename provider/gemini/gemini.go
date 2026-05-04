@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"google.golang.org/genai"
 
@@ -14,10 +15,17 @@ import (
 )
 
 // Provider implements bridle.Provider for Google Gemini.
+//
+// One Provider value is safe for concurrent use across goroutines.
+// The genai client is constructed lazily on first RunTurn (or via
+// NewWithClient) and reused for the lifetime of the Provider; init is
+// guarded by clientOnce so concurrent first-callers don't race.
 type Provider struct {
-	client *genai.Client
-	apiKey string
-	backend genai.Backend
+	clientOnce sync.Once
+	clientErr  error // captured by clientOnce for re-raising to subsequent callers
+	client     *genai.Client
+	apiKey     string
+	backend    genai.Backend
 }
 
 // New returns a Gemini provider that talks to the Gemini Developer API.
@@ -51,20 +59,31 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 	}
 }
 
+// getClient returns the lazily-constructed genai client. Concurrent
+// callers serialize on clientOnce; the first caller's success or
+// failure is replayed to all subsequent callers. If NewWithClient was
+// used, p.client is non-nil before getClient is ever called and
+// clientOnce is effectively a no-op.
 func (p *Provider) getClient(ctx context.Context) (*genai.Client, error) {
-	if p.client != nil {
-		return p.client, nil
+	p.clientOnce.Do(func() {
+		if p.client != nil {
+			return // injected via NewWithClient — nothing to do
+		}
+		cfg := &genai.ClientConfig{Backend: p.backend}
+		if p.apiKey != "" {
+			cfg.APIKey = p.apiKey
+		}
+		c, err := genai.NewClient(ctx, cfg)
+		if err != nil {
+			p.clientErr = fmt.Errorf("gemini: client init: %w", err)
+			return
+		}
+		p.client = c
+	})
+	if p.clientErr != nil {
+		return nil, p.clientErr
 	}
-	cfg := &genai.ClientConfig{Backend: p.backend}
-	if p.apiKey != "" {
-		cfg.APIKey = p.apiKey
-	}
-	c, err := genai.NewClient(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("gemini: client init: %w", err)
-	}
-	p.client = c
-	return c, nil
+	return p.client, nil
 }
 
 // RunTurn calls the Gemini GenerateContent API and emits bridle events to sink.
@@ -178,12 +197,26 @@ func toGeminiContents(msgs []bridle.ProviderMessage) []*genai.Content {
 				Parts: []*genai.Part{{Text: m.Content}},
 			})
 		case "tool_result":
+			// Gemini's FunctionResponse requires Name to match the
+			// FunctionDeclaration.Name of the called function — not the
+			// call instance ID. Earlier drafts set Name = ToolCallID
+			// which causes the API to reject multi-turn tool
+			// conversations with "function call id not found" or
+			// silently misroute the response. ProviderMessage.ToolName
+			// carries the declaration name (set by the harness when it
+			// builds the tool_result message); fall back to ToolCallID
+			// only as a last-ditch defense — that path will fail at the
+			// API but at least the failure is visible.
+			name := m.ToolName
+			if name == "" {
+				name = m.ToolCallID
+			}
 			out = append(out, &genai.Content{
 				Role: "user",
 				Parts: []*genai.Part{{
 					FunctionResponse: &genai.FunctionResponse{
 						ID:       m.ToolCallID,
-						Name:     m.ToolCallID,
+						Name:     name,
 						Response: map[string]any{"result": m.Content},
 					},
 				}},
