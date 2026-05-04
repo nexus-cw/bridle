@@ -72,8 +72,20 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		args = append(args, "--system-prompt", req.SystemPrompt)
 	}
 
-	if len(p.AllowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(p.AllowedTools, ","))
+	// Allowed tools: per-turn list from the funnel (req.Tools.Name) takes
+	// precedence; fall back to the provider-level default. The CLI owns
+	// execution, so the funnel sets the *allowlist*, not the schemas.
+	allowed := p.AllowedTools
+	if len(req.Tools) > 0 {
+		allowed = make([]string, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			if t.Name != "" {
+				allowed = append(allowed, t.Name)
+			}
+		}
+	}
+	if len(allowed) > 0 {
+		args = append(args, "--allowedTools", strings.Join(allowed, ","))
 	}
 
 	if req.Model != "" {

@@ -68,6 +68,40 @@ func ParseSessionEvent(e SessionEvent) (NormalizedSessionEvent, error) {
 		if err := json.Unmarshal(e.RawJSON, &tc); err == nil && tc.Function.Name != "" {
 			return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: %s %s", tc.Function.Name, tc.Function.Arguments)}, nil
 		}
+	case ProviderGeminiCLI:
+		var ev struct {
+			Type       string          `json:"type"`
+			ToolName   string          `json:"tool_name"`
+			Parameters json.RawMessage `json:"parameters"`
+			SessionID  string          `json:"session_id"`
+			Model      string          `json:"model"`
+		}
+		if err := json.Unmarshal(e.RawJSON, &ev); err == nil {
+			switch ev.Type {
+			case "tool_use":
+				return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: %s %s", ev.ToolName, ev.Parameters)}, nil
+			case "init", "":
+				if ev.SessionID != "" {
+					return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("init: session=%s model=%s", ev.SessionID, ev.Model)}, nil
+				}
+			}
+		}
+	case ProviderGemini:
+		var fc struct {
+			FunctionCall struct {
+				Name string          `json:"name"`
+				Args json.RawMessage `json:"args"`
+			} `json:"functionCall"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(e.RawJSON, &fc); err == nil {
+			if fc.FunctionCall.Name != "" {
+				return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: %s %s", fc.FunctionCall.Name, fc.FunctionCall.Args)}, nil
+			}
+			if fc.Text != "" {
+				return NormalizedSessionEvent{Role: e.Role, Content: fc.Text}, nil
+			}
+		}
 	}
 	// Unknown provider or shape — return raw bytes as content.
 	return NormalizedSessionEvent{Role: e.Role, Content: string(e.RawJSON)}, nil

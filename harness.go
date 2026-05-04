@@ -16,6 +16,8 @@ const (
 	ProviderClaude ProviderID = "claude-api"
 	ProviderOllama ProviderID = "ollama-local"
 	ProviderOpenAI ProviderID = "openai-api"
+	ProviderGemini    ProviderID = "gemini-api"
+	ProviderGeminiCLI ProviderID = "gemini-cli"
 )
 
 // StopReason explains why a turn ended.

@@ -31,6 +31,18 @@ func OpenAIStopReason(raw string) string {
 	}
 }
 
+// GeminiStopReason maps Gemini FinishReason values to bridle StopReason values.
+func GeminiStopReason(raw string) string {
+	switch raw {
+	case "STOP", "FINISH_REASON_STOP":
+		return "model_done"
+	case "MAX_TOKENS":
+		return "max_steps"
+	default:
+		return "model_done"
+	}
+}
+
 // OllamaStopReason maps Ollama done_reason strings to bridle StopReason values.
 func OllamaStopReason(raw string) string {
 	switch raw {
