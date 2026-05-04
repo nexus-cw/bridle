@@ -13,7 +13,9 @@ package bedrock
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -27,8 +29,10 @@ import (
 
 // Provider implements bridle.Provider for AWS Bedrock via the Converse API.
 type Provider struct {
-	client *bedrockruntime.Client
-	region string
+	mu        sync.Mutex
+	client    *bedrockruntime.Client
+	clientErr error // cached for permanent failures only; ctx errors are not cached
+	region    string
 	// Profile selects an AWS shared-config profile (overrides AWS_PROFILE if set).
 	Profile string
 }
@@ -56,9 +60,22 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 	}
 }
 
+// getClient lazily initializes the Bedrock client. Concurrent RunTurn calls
+// are serialized through p.mu; once the client is built, callers see it
+// without contention via the early read path.
+//
+// Error caching policy: a permanent failure (bad profile, missing region with
+// no fallback, etc.) is cached so subsequent callers fail fast. Context
+// cancellation / deadline-exceeded errors are NOT cached — a transient ctx
+// failure on the first call must not permanently brick a long-lived Provider.
 func (p *Provider) getClient(ctx context.Context) (*bedrockruntime.Client, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.client != nil {
 		return p.client, nil
+	}
+	if p.clientErr != nil {
+		return nil, p.clientErr
 	}
 	opts := []func(*awsconfig.LoadOptions) error{}
 	if p.region != "" {
@@ -69,7 +86,12 @@ func (p *Provider) getClient(ctx context.Context) (*bedrockruntime.Client, error
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("bedrock: load aws config: %w", err)
+		wrapped := fmt.Errorf("bedrock: load aws config: %w", err)
+		// Don't cache transient ctx failures — let the next caller retry.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			p.clientErr = wrapped
+		}
+		return nil, wrapped
 	}
 	p.client = bedrockruntime.NewFromConfig(cfg)
 	return p.client, nil
@@ -137,7 +159,10 @@ func extractResult(resp *bedrockruntime.ConverseOutput, sink bridle.EventSink) (
 			})
 
 		case *types.ContentBlockMemberToolUse:
-			argsJSON, _ := documentToJSON(b.Value.Input)
+			argsJSON, jerr := documentToJSON(b.Value.Input)
+			if jerr != nil {
+				return bridle.ProviderResult{}, jerr
+			}
 			id := aws.ToString(b.Value.ToolUseId)
 			name := aws.ToString(b.Value.Name)
 			toolCalls = append(toolCalls, bridle.ToolInvocation{
@@ -164,49 +189,93 @@ func extractResult(resp *bedrockruntime.ConverseOutput, sink bridle.EventSink) (
 		usage.OutputTokens = int(aws.ToInt32(resp.Usage.OutputTokens))
 	}
 
-	stopReason := bridle.StopReason(normalize.BedrockStopReason(string(resp.StopReason)))
+	rawStop := string(resp.StopReason)
+	stopReason := bridle.StopReason(normalize.BedrockStopReason(rawStop))
 
-	return bridle.ProviderResult{
+	result := bridle.ProviderResult{
 		FinalText:    finalText,
 		ToolCalls:    toolCalls,
 		Usage:        usage,
 		StopReason:   stopReason,
 		SessionDelta: sessionDelta,
-	}, nil
+	}
+
+	// Safety stops surface as a non-nil error so harness callers can
+	// distinguish a model that completed normally from one that was blocked.
+	// StopReason stays as StopReasonError to match.
+	if rawStop == string(types.StopReasonGuardrailIntervened) {
+		return result, fmt.Errorf("bedrock: guardrail_intervened: response blocked by configured guardrail")
+	}
+	if rawStop == string(types.StopReasonContentFiltered) {
+		return result, fmt.Errorf("bedrock: content_filtered: response blocked by content filter")
+	}
+
+	return result, nil
 }
 
+// toBedrockMessages flattens bridle ProviderMessages into Bedrock Converse
+// messages. Consecutive tool_result entries are grouped into a single
+// user-role message containing multiple ToolResultBlocks — Bedrock rejects
+// requests that send each tool_result as its own user turn (consecutive
+// same-role messages are invalid in the Converse contract).
+//
+// Pre-existing harness limitation: prior assistant turns that contained
+// tool_use blocks are surfaced here as Role=assistant + Content=text only
+// (ProviderMessage doesn't carry RawJSON). Multi-turn tool conversations
+// where the model has to see its own past tool_use calls reconstructed will
+// fail at the Bedrock validation layer until ProviderMessage gains a
+// structured tool-call-history field — that's a bridle harness change, not
+// a provider-local fix.
 func toBedrockMessages(msgs []bridle.ProviderMessage) ([]types.Message, error) {
 	out := make([]types.Message, 0, len(msgs))
+	var pendingToolResults []types.ContentBlock
+
+	flushToolResults := func() {
+		if len(pendingToolResults) == 0 {
+			return
+		}
+		out = append(out, types.Message{
+			Role:    types.ConversationRoleUser,
+			Content: pendingToolResults,
+		})
+		pendingToolResults = nil
+	}
+
 	for _, m := range msgs {
-		var role types.ConversationRole
-		var blocks []types.ContentBlock
 		switch m.Role {
+		case "tool_result":
+			pendingToolResults = append(pendingToolResults, &types.ContentBlockMemberToolResult{
+				Value: types.ToolResultBlock{
+					ToolUseId: aws.String(m.ToolCallID),
+					Content: []types.ToolResultContentBlock{
+						&types.ToolResultContentBlockMemberText{Value: m.Content},
+					},
+				},
+			})
+
 		case "user", "system":
+			flushToolResults()
 			// Converse takes system separately via the System field; if a
 			// ProviderMessage sneaks in with role=system, fold it into a user
 			// turn rather than dropping it.
-			role = types.ConversationRoleUser
-			blocks = []types.ContentBlock{&types.ContentBlockMemberText{Value: m.Content}}
+			out = append(out, types.Message{
+				Role:    types.ConversationRoleUser,
+				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: m.Content}},
+			})
+
 		case "assistant":
-			role = types.ConversationRoleAssistant
-			blocks = []types.ContentBlock{&types.ContentBlockMemberText{Value: m.Content}}
-		case "tool_result":
-			role = types.ConversationRoleUser
-			blocks = []types.ContentBlock{
-				&types.ContentBlockMemberToolResult{
-					Value: types.ToolResultBlock{
-						ToolUseId: aws.String(m.ToolCallID),
-						Content: []types.ToolResultContentBlock{
-							&types.ToolResultContentBlockMemberText{Value: m.Content},
-						},
-					},
-				},
-			}
+			flushToolResults()
+			out = append(out, types.Message{
+				Role:    types.ConversationRoleAssistant,
+				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: m.Content}},
+			})
+
 		default:
+			// Unknown role — skip rather than emit garbage.
 			continue
 		}
-		out = append(out, types.Message{Role: role, Content: blocks})
 	}
+	flushToolResults()
 	return out, nil
 }
 
