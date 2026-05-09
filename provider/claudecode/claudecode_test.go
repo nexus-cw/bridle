@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	bridle "github.com/nexus-cw/bridle"
-	"github.com/nexus-cw/bridle/fake"
-	"github.com/nexus-cw/bridle/provider/claudecode"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/fake"
+	"github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 )
 
 // claudeAvailable returns true if the claude CLI is on PATH.

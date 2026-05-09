@@ -1,4 +1,4 @@
-module github.com/nexus-cw/bridle
+module github.com/CarriedWorldUniverse/bridle
 
 go 1.25.5
 

@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 
-	bridle "github.com/nexus-cw/bridle"
+	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
 // Step describes one scripted action the fake provider should take.

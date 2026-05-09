@@ -24,10 +24,10 @@ import (
 	"path/filepath"
 	"time"
 
-	bridle "github.com/nexus-cw/bridle"
-	claudeapi "github.com/nexus-cw/bridle/provider/claude"
-	"github.com/nexus-cw/bridle/provider/claudecode"
-	"github.com/nexus-cw/bridle/provider/ollama"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	claudeapi "github.com/CarriedWorldUniverse/bridle/provider/claude"
+	"github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	"github.com/CarriedWorldUniverse/bridle/provider/ollama"
 )
 
 func main() {

@@ -9,7 +9,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/nexus-cw/bridle/internal/mcpclient"
+	"github.com/CarriedWorldUniverse/bridle/internal/mcpclient"
 )
 
 // newInProcessClient wires an MCPServer to an in-process client.

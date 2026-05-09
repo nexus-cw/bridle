@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/nexus-cw/bridle/internal/mcpclient"
+	"github.com/CarriedWorldUniverse/bridle/internal/mcpclient"
 )
 
 // runTurn is the inner implementation, called by RunTurn after the panic trap.

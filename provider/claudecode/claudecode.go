@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
-	bridle "github.com/nexus-cw/bridle"
-	"github.com/nexus-cw/bridle/internal/normalize"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
 )
 
 const providerID bridle.ProviderID = "claude-code"

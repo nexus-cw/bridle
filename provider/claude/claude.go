@@ -9,8 +9,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
-	bridle "github.com/nexus-cw/bridle"
-	"github.com/nexus-cw/bridle/internal/normalize"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
 )
 
 // Provider implements bridle.Provider for the Anthropic Claude API.

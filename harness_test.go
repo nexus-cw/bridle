@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	bridle "github.com/nexus-cw/bridle"
-	"github.com/nexus-cw/bridle/fake"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/fake"
 )
 
 // --- helpers ---

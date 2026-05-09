@@ -10,8 +10,8 @@ import (
 
 	"github.com/ollama/ollama/api"
 
-	bridle "github.com/nexus-cw/bridle"
-	"github.com/nexus-cw/bridle/internal/normalize"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
 )
 
 const defaultBaseURL = "http://localhost:11434"

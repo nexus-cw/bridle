@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	bridle "github.com/nexus-cw/bridle"
+	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
 // ToolResult is a scripted response for a named tool.

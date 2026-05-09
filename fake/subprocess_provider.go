@@ -3,7 +3,7 @@ package fake
 import (
 	"context"
 
-	bridle "github.com/nexus-cw/bridle"
+	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
 // SubprocessStep describes one scripted event the SubprocessProvider emits.

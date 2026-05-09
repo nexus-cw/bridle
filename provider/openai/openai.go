@@ -10,8 +10,8 @@ import (
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/shared"
 
-	bridle "github.com/nexus-cw/bridle"
-	"github.com/nexus-cw/bridle/internal/normalize"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
 )
 
 // Provider implements bridle.Provider for the OpenAI API.
