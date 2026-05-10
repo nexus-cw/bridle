@@ -264,9 +264,11 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 
 func addUsage(a, b Usage) Usage {
 	return Usage{
-		InputTokens:  a.InputTokens + b.InputTokens,
-		OutputTokens: a.OutputTokens + b.OutputTokens,
-		CostUSD:      a.CostUSD + b.CostUSD,
+		InputTokens:              a.InputTokens + b.InputTokens,
+		OutputTokens:             a.OutputTokens + b.OutputTokens,
+		CacheReadInputTokens:     a.CacheReadInputTokens + b.CacheReadInputTokens,
+		CacheCreationInputTokens: a.CacheCreationInputTokens + b.CacheCreationInputTokens,
+		CostUSD:                  a.CostUSD + b.CostUSD,
 	}
 }
 

@@ -62,6 +62,17 @@ func TestClaudeCode_RoundTrip(t *testing.T) {
 	if !hasDone {
 		t.Error("no TurnDone event emitted")
 	}
+
+	// Cache token surfacing — Anthropic's stream-json result event
+	// carries cache_read/cache_creation tokens. claude-code's first
+	// invocation typically populates cache_creation (it caches the
+	// system prompt) and cache_read=0. Bridle must surface both.
+	t.Logf("usage: input=%d output=%d cache_read=%d cache_create=%d",
+		result.Usage.InputTokens, result.Usage.OutputTokens,
+		result.Usage.CacheReadInputTokens, result.Usage.CacheCreationInputTokens)
+	if result.Usage.CacheCreationInputTokens == 0 && result.Usage.CacheReadInputTokens == 0 {
+		t.Errorf("expected cache_read OR cache_creation to be non-zero on a real claude turn; got both 0 — bridle parser is not surfacing cache fields from stream-json")
+	}
 }
 
 // TestClaudeCode_SessionResume verifies that a second turn with the same
