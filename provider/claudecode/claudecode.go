@@ -96,7 +96,16 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 
 	prompt := buildPrompt(req)
 
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
+	// --permission-mode bypassPermissions: aspects in nexus run with
+	// full filesystem trust by design — the operator's threat model is
+	// "the aspect is me, just running headless." Without this flag,
+	// claude-code's default sandbox limits file ops to the launch cwd,
+	// which is the nexus process dir and useless for repo work. The
+	// operator-trusted-aspect model has been the rule since agent-
+	// network; bridle.claudecode honors it for parity. Aspects that
+	// need restriction should run a different provider or wrap with
+	// OS-level sandboxing — bridle defers to the runtime, not provider.
+	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
 
 	if req.SystemPrompt != "" {
 		args = append(args, "--system-prompt", req.SystemPrompt)

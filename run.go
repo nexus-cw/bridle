@@ -228,7 +228,22 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 				content += fmt.Sprintf("[from %s]: %s\n", item.From, item.Content)
 			}
 		}
-		if len(triagedIDs) > 0 {
+		// Triage requirement only fires when the funnel registered the
+		// triage + send_chat tools (req.Tools non-empty). claude-code-
+		// backed funnels run with nil Tools because the subprocess owns
+		// its tool surface natively (see #181); telling the model to
+		// call triage() when triage isn't callable just makes it loop
+		// trying to find the tool and refuse the request. The triage
+		// contract is a feature of direct-API providers; subprocess-
+		// stream paths surface replies via the auto-post path instead.
+		hasTriageTool := false
+		for _, t := range req.Tools {
+			if t.Name == "triage" {
+				hasTriageTool = true
+				break
+			}
+		}
+		if len(triagedIDs) > 0 && hasTriageTool {
 			content += "\n## Triage requirement\n"
 			content += "You MUST call triage(msg_id, decision, reason) once for EVERY chat msg_id above before this turn ends.\n"
 			content += "  - decision=\"reply\" if you used send_chat to address that msg_id (cite it via reply_to or in-content reference)\n"
