@@ -77,8 +77,16 @@ func ParseSessionEvent(e SessionEvent) (NormalizedSessionEvent, error) {
 // The funnel mints handles and maps them to threads; the provider uses the
 // ID to resume state (e.g., --resume <session-id> for subprocess-stream).
 // For direct-api providers, Handle may be empty; state comes from SessionTail.
+//
+// New tells the provider whether the funnel is initiating a fresh session
+// for this ID (true) or asking it to continue an existing one (false).
+// For subprocess-stream providers like claudecode that maintain their own
+// jsonl files, this is the difference between "create with this id" vs
+// "load existing id". Direct-api providers that derive state from
+// SessionTail can ignore this field.
 type SessionHandle struct {
-	ID string // opaque to the funnel; meaningful to the provider
+	ID  string // opaque to the funnel; meaningful to the provider
+	New bool   // true on the first invocation for this ID; false on continuations
 }
 
 // SessionEvent is a single entry in a session's event log.

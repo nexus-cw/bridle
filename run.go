@@ -213,9 +213,35 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 	}
 
 	if len(req.Inbox) > 0 {
+		// Format inbox items with their msg_id so the model can call
+		// triage(msg_id=...) for each one. Without the id in the prompt
+		// the model has nothing to reference and the triage contract
+		// can't bind. Items with MsgID==0 are synthetic/internal and
+		// don't participate in triage.
 		content := "Messages received since last turn:\n"
+		var triagedIDs []int64
 		for _, item := range req.Inbox {
-			content += fmt.Sprintf("[from %s]: %s\n", item.From, item.Content)
+			if item.MsgID > 0 {
+				content += fmt.Sprintf("[msg_id=%d from=%s]: %s\n", item.MsgID, item.From, item.Content)
+				triagedIDs = append(triagedIDs, item.MsgID)
+			} else {
+				content += fmt.Sprintf("[from %s]: %s\n", item.From, item.Content)
+			}
+		}
+		if len(triagedIDs) > 0 {
+			content += "\n## Triage requirement\n"
+			content += "You MUST call triage(msg_id, decision, reason) once for EVERY chat msg_id above before this turn ends.\n"
+			content += "  - decision=\"reply\" if you used send_chat to address that msg_id (cite it via reply_to or in-content reference)\n"
+			content += "  - decision=\"skip\" with a reason for any message you intentionally do not reply to\n"
+			content += "Skip reasons: addressed_to_other, acknowledgement_only, out_of_scope, duplicate, noise, or a freeform sentence.\n"
+			content += "msg_ids requiring triage this turn: "
+			for i, id := range triagedIDs {
+				if i > 0 {
+					content += ", "
+				}
+				content += fmt.Sprintf("%d", id)
+			}
+			content += "\n"
 		}
 		messages = append(messages, ProviderMessage{Role: "user", Content: content})
 	}

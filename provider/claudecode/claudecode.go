@@ -5,9 +5,11 @@
 // bridle parses the stdout event stream. BeforeToolCall does not fire;
 // AfterToolCall fires after each parsed tool_use/tool_result pair (observe-only).
 //
-// Session continuity: the caller passes a SessionHandle with a non-empty ID
-// to resume a prior session via --resume. For a new session the funnel mints a
-// fresh UUID and the CLI creates a new session file automatically.
+// Session continuity: the caller passes a SessionHandle with a non-empty ID.
+// SessionHandle.New=true → the funnel is starting a fresh session for this
+// ID, so we pass --session-id <id> (CLI creates the jsonl). New=false → the
+// funnel is continuing an existing session, so we pass --resume <id> (CLI
+// loads the jsonl, errors if not found).
 package claudecode
 
 import (
@@ -58,7 +60,35 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 // If req.Session.ID is non-empty, passes --resume <id> for continuity.
 // Tool calls are executed by the CLI; bridle's ToolRunner is not called.
 // Cancellation via ctx sends SIGTERM then SIGKILL after a grace period.
+//
+// Session-id resilience: when Session.New is true but claude-code reports
+// "Session ID already in use", retry once with --resume. This handles
+// the case where a prior turn started, wrote the jsonl, and errored
+// before the funnel could flip Session.New=false. Without the fallback
+// the session was permanently bricked.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	result, err := p.runTurnOnce(ctx, req, sink, req.Session.New)
+	if err != nil && req.Session.ID != "" && req.Session.New && isSessionIDInUseErr(err) {
+		// First attempt was --session-id and the id is already taken
+		// (probably from a prior failed turn that wrote the jsonl).
+		// Retry once with --resume — the on-disk session is the right
+		// continuation point.
+		return p.runTurnOnce(ctx, req, sink, false)
+	}
+	return result, err
+}
+
+// isSessionIDInUseErr matches claude-code's "Session ID ... is already
+// in use" error message. Substring match — claude-code's exact format
+// includes ANSI color codes which we'd rather not pin against.
+func isSessionIDInUseErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "is already in use")
+}
+
+func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink, sessionIsNew bool) (bridle.ProviderResult, error) {
 	claudePath := p.ClaudePath
 	if claudePath == "" {
 		claudePath = "claude"
@@ -80,9 +110,18 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		args = append(args, "--model", req.Model)
 	}
 
-	// Session continuity: --resume for existing sessions.
+	// Session continuity: --session-id creates a fresh CLI session jsonl
+	// with this id; --resume loads an existing one. The funnel signals
+	// which via Session.New so the provider doesn't have to probe disk.
+	// claude-code errors loudly on --resume for a non-existent id, so
+	// getting this wrong on the first turn is the difference between a
+	// working aspect and a permanent NoConversationFound on every turn.
 	if req.Session.ID != "" {
-		args = append(args, "--resume", req.Session.ID)
+		if sessionIsNew {
+			args = append(args, "--session-id", req.Session.ID)
+		} else {
+			args = append(args, "--resume", req.Session.ID)
+		}
 	}
 
 	args = append(args, p.ExtraArgs...)
@@ -189,9 +228,21 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 						Name  string          `json:"name"`
 						Input json.RawMessage `json:"input"`
 					} `json:"content"`
+					Usage struct {
+						InputTokens              int `json:"input_tokens"`
+						OutputTokens             int `json:"output_tokens"`
+						CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+						CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+					} `json:"usage"`
 				} `json:"message"`
 			}
 			if jsonErr := json.Unmarshal(line, &msg); jsonErr == nil {
+				// Cache stats live on per-message usage in the
+				// assistant stream event, NOT the result event.
+				// Accumulate as the stream goes by; the result
+				// event's totals don't include cache breakdown.
+				usage.CacheReadInputTokens += msg.Message.Usage.CacheReadInputTokens
+				usage.CacheCreationInputTokens += msg.Message.Usage.CacheCreationInputTokens
 				for _, block := range msg.Message.Content {
 					switch block.Type {
 					case "text":
@@ -261,8 +312,10 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 				Result     string `json:"result"`
 				StopReason string `json:"stop_reason"`
 				Usage      struct {
-					InputTokens  int `json:"input_tokens"`
-					OutputTokens int `json:"output_tokens"`
+					InputTokens              int `json:"input_tokens"`
+					OutputTokens             int `json:"output_tokens"`
+					CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+					CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 				} `json:"usage"`
 			}
 			if jsonErr := json.Unmarshal(line, &res); jsonErr == nil {
@@ -272,6 +325,8 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 				stopReason = bridle.StopReason(normalize.ClaudeStopReason(res.StopReason))
 				usage.InputTokens = res.Usage.InputTokens
 				usage.OutputTokens = res.Usage.OutputTokens
+				usage.CacheReadInputTokens = res.Usage.CacheReadInputTokens
+				usage.CacheCreationInputTokens = res.Usage.CacheCreationInputTokens
 				gotResult = true
 			}
 		}

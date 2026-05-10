@@ -118,8 +118,10 @@ func extractResult(msg *anthropic.Message, sink bridle.EventSink) (bridle.Provid
 		FinalText: finalText,
 		ToolCalls: toolCalls,
 		Usage: bridle.Usage{
-			InputTokens:  int(msg.Usage.InputTokens),
-			OutputTokens: int(msg.Usage.OutputTokens),
+			InputTokens:              int(msg.Usage.InputTokens),
+			OutputTokens:             int(msg.Usage.OutputTokens),
+			CacheReadInputTokens:     int(msg.Usage.CacheReadInputTokens),
+			CacheCreationInputTokens: int(msg.Usage.CacheCreationInputTokens),
 		},
 		StopReason:   stopReason,
 		SessionDelta: sessionDelta,

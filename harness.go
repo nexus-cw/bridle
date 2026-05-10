@@ -29,10 +29,24 @@ const (
 )
 
 // Usage holds token and cost data for a turn.
+//
+// InputTokens is the count of UNCACHED prompt tokens billed at full
+// rate. CacheReadInputTokens and CacheCreationInputTokens surface
+// claude-api's prompt-caching behavior — the former is read at a
+// discount, the latter is the new content being added to cache. Cache
+// fields are zero for providers that don't expose caching (or don't
+// run a cache-eligible request).
+//
+// Sum (InputTokens + CacheReadInputTokens + CacheCreationInputTokens)
+// approximates the total prompt size the model received. Use that
+// for context-fullness reasoning; use InputTokens alone for billing
+// estimates of fresh content.
 type Usage struct {
-	InputTokens  int
-	OutputTokens int
-	CostUSD      float64 // provider-reported or estimated; 0 if unknown
+	InputTokens              int
+	OutputTokens             int
+	CacheReadInputTokens     int     // Anthropic prompt-cache hit count
+	CacheCreationInputTokens int     // tokens written into the prompt cache this turn
+	CostUSD                  float64 // provider-reported or estimated; 0 if unknown
 }
 
 // ToolInvocation records a single tool call the model made.
@@ -47,9 +61,16 @@ type ToolInvocation struct {
 // InboxItem is a comms message that arrived during the previous turn.
 // The harness folds these into the prompt context before the first model call.
 // Read-only from the harness's perspective.
+//
+// MsgID is the chat msg_id this item was sourced from. It carries
+// through into the prompt so the model can reference items by id when
+// triaging ("triage(msg_id=17, decision='reply')"). Zero means the
+// item didn't originate from a chat message — it's an internal/synthetic
+// item the funnel injected, and the triage contract doesn't apply.
 type InboxItem struct {
 	From    string
 	Content string
+	MsgID   int64
 	RawJSON json.RawMessage
 }
 
