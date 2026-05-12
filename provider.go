@@ -45,6 +45,11 @@ type ProviderRequest struct {
 	MCP          *MCPClientConfig  // nil = no MCP tools
 	MaxSteps     int
 	Model        string
+
+	// Cwd is the working directory for subprocess-style providers (see
+	// TurnRequest.Cwd). Empty falls through to bridle's host cwd. Direct-
+	// API providers ignore this field.
+	Cwd string
 }
 
 // ProviderMessage is a single exchange entry in provider-agnostic form.

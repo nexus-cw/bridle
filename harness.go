@@ -94,6 +94,17 @@ type TurnRequest struct {
 	Provider ProviderID // claude-api | ollama-local | openai-api | claude-code
 	Model    string     // REQUIRED — provider-specific model id; RunTurn returns ErrModelRequired if empty
 	MaxSteps int        // hard cap on tool-call rounds; 0 = unlimited
+
+	// Cwd is the working directory for subprocess-style providers
+	// (currently claude-code). Empty falls through to the bridle host
+	// process's cwd. Per-request rather than per-Harness because
+	// different aspects sharing one Harness need distinct cwds —
+	// claude-code derives its session jsonl path AND its .mcp.json
+	// discovery from cwd, so two aspects with the same Harness but
+	// overlapping cwds collide sessions and leak MCP identity from one
+	// into the other. Direct-API providers (claude-api, ollama, openai)
+	// ignore this field — they have no subprocess to anchor.
+	Cwd string
 }
 
 // TurnResult is the structured outcome of a completed turn.
