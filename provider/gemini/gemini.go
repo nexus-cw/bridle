@@ -10,8 +10,8 @@ import (
 
 	"google.golang.org/genai"
 
-	bridle "github.com/nexus-cw/bridle"
-	"github.com/nexus-cw/bridle/internal/normalize"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
 )
 
 // Provider implements bridle.Provider for Google Gemini.
@@ -96,9 +96,9 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	contents := toGeminiContents(req.Messages)
 
 	cfg := &genai.GenerateContentConfig{}
-	if req.SystemPrompt != "" {
+	if req.AppendSystemPrompt != "" {
 		cfg.SystemInstruction = &genai.Content{
-			Parts: []*genai.Part{{Text: req.SystemPrompt}},
+			Parts: []*genai.Part{{Text: req.AppendSystemPrompt}},
 		}
 	}
 	if tools := toGeminiTools(req.Tools); len(tools) > 0 {
