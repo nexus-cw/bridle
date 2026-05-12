@@ -63,6 +63,13 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("claude: message conversion: %w", err)
 	}
 
+	// AppendSystemPrompt is the field name shared across all bridle providers
+	// for consistency with claudecode (where the semantic distinction matters —
+	// see provider/claudecode/claudecode.go for why). Anthropic's chat
+	// completions API has no "default system prompt" injected by the runtime;
+	// the caller's content IS the whole system message. So here the field
+	// functions identically to a plain SystemPrompt — rename is semantic
+	// consistency, not behavior change.
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(req.Model),
 		System:    toClaudeSystem(req.AppendSystemPrompt),
