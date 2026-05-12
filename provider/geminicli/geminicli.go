@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	bridle "github.com/nexus-cw/bridle"
+	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
 const providerID bridle.ProviderID = "gemini-cli"
@@ -376,8 +376,8 @@ func buildPrompt(req bridle.ProviderRequest) string {
 	}
 
 	preamble := ""
-	if req.SystemPrompt != "" {
-		preamble = "System: " + req.SystemPrompt + "\n\n"
+	if req.AppendSystemPrompt != "" {
+		preamble = "System: " + req.AppendSystemPrompt + "\n\n"
 	}
 
 	if len(contextLines) == 0 {
