@@ -13,9 +13,10 @@ var ErrModelRequired = errors.New("bridle: TurnRequest.Model is required")
 type ProviderID string
 
 const (
-	ProviderClaude ProviderID = "claude-api"
-	ProviderOllama ProviderID = "ollama-local"
-	ProviderOpenAI ProviderID = "openai-api"
+	ProviderClaude    ProviderID = "claude-api"
+	ProviderOllama    ProviderID = "ollama-local"
+	ProviderOpenAI    ProviderID = "openai-api"
+	ProviderBedrock   ProviderID = "bedrock"
 	ProviderGemini    ProviderID = "gemini-api"
 	ProviderGeminiCLI ProviderID = "gemini-cli"
 )

@@ -68,6 +68,14 @@ func ParseSessionEvent(e SessionEvent) (NormalizedSessionEvent, error) {
 		if err := json.Unmarshal(e.RawJSON, &tc); err == nil && tc.Function.Name != "" {
 			return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: %s %s", tc.Function.Name, tc.Function.Arguments)}, nil
 		}
+	case ProviderBedrock:
+		var tu struct {
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		}
+		if err := json.Unmarshal(e.RawJSON, &tu); err == nil && tu.Name != "" {
+			return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: %s %s", tu.Name, tu.Input)}, nil
+		}
 	case ProviderGeminiCLI:
 		var ev struct {
 			Type       string          `json:"type"`
