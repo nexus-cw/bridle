@@ -78,7 +78,7 @@ type InboxItem struct {
 type TurnRequest struct {
 	// Identity & framing
 	AspectID     string         // who's running (cost/triage/identity attribution)
-	SystemPrompt string         // composed by funnel: NEXUS.md + SOUL.md + PRIMER + harness rules
+	AppendSystemPrompt string         // composed by funnel: NEXUS.md + SOUL.md + PRIMER + harness rules
 	Session      SessionHandle  // opaque handle for provider-side state (subprocess-stream: resume key)
 	SessionTail  []SessionEvent // recent events for direct-api providers to lower into the request
 

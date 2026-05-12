@@ -65,7 +65,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(req.Model),
-		System:    toClaudeSystem(req.SystemPrompt),
+		System:    toClaudeSystem(req.AppendSystemPrompt),
 		Messages:  messages,
 		MaxTokens: 4096,
 	}
