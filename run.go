@@ -274,6 +274,7 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 		MCP:          req.MCP,
 		MaxSteps:     req.MaxSteps,
 		Model:        req.Model,
+		Cwd:          req.Cwd,
 	}
 }
 

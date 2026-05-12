@@ -144,6 +144,15 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	// Don't use exec.CommandContext — that SIGKILLs immediately on cancel.
 	// We want SIGTERM first, then SIGKILL after a grace period.
 	cmd := exec.Command(claudePath, args...)
+	// Cwd anchors claude-code's session jsonl path AND its .mcp.json
+	// discovery, both of which are derived from process cwd. Per-aspect
+	// callers (e.g. nexus's funnel) set req.Cwd to the aspect's home so
+	// sessions don't collide and MCP identity doesn't leak across
+	// aspects sharing the same Harness. Empty falls through to the
+	// bridle host's cwd, which is correct for single-aspect callers.
+	if req.Cwd != "" {
+		cmd.Dir = req.Cwd
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
