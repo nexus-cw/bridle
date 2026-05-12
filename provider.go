@@ -38,7 +38,7 @@ type Provider interface {
 // inbox items are folded in.
 type ProviderRequest struct {
 	AspectID     string
-	SystemPrompt string
+	AppendSystemPrompt string
 	Session      SessionHandle  // for subprocess-stream: resume key; for direct-api: may be empty
 	Messages     []ProviderMessage
 	Tools        []ToolDef

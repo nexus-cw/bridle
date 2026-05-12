@@ -80,9 +80,9 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		Stream:   &stream,
 		Options:  map[string]any{},
 	}
-	if req.SystemPrompt != "" {
+	if req.AppendSystemPrompt != "" {
 		chatReq.Messages = append([]api.Message{
-			{Role: "system", Content: req.SystemPrompt},
+			{Role: "system", Content: req.AppendSystemPrompt},
 		}, chatReq.Messages...)
 	}
 

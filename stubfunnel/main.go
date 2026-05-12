@@ -135,7 +135,7 @@ func main() {
 
 		req := bridle.TurnRequest{
 			AspectID:     "stubfunnel",
-			SystemPrompt: "You are a test aspect in the Nexus network. Use tools when asked. When you want to send information back to the network, use send_comms.",
+			AppendSystemPrompt: "You are a test aspect in the Nexus network. Use tools when asked. When you want to send information back to the network, use send_comms.",
 			SessionTail:  sessionTail,
 			UserMessage:  *promptFlag,
 			Inbox:        inbox,
@@ -206,7 +206,7 @@ func runLogDecisionTurn(ctx context.Context, h *bridle.Harness, model string, tu
 
 	req := bridle.TurnRequest{
 		AspectID:     "stubfunnel",
-		SystemPrompt: "You are a log-decision judge. Your only job is to call log_decision.",
+		AppendSystemPrompt: "You are a log-decision judge. Your only job is to call log_decision.",
 		SessionTail:  tail,
 		UserMessage:  prompt,
 		Tools:        logTool,

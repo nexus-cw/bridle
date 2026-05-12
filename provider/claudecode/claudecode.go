@@ -107,8 +107,14 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	// OS-level sandboxing — bridle defers to the runtime, not provider.
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
 
-	if req.SystemPrompt != "" {
-		args = append(args, "--system-prompt", req.SystemPrompt)
+	if req.AppendSystemPrompt != "" {
+		// --append-system-prompt (not --system-prompt) preserves Anthropic's
+		// default system prompt — toolkit awareness, skill discovery, conversation
+		// patterns, behavioral defaults — and layers the caller's prompt on top.
+		// --system-prompt would REPLACE those defaults entirely, which silently
+		// neuters tool-use prompting and skill enumeration. The caller's prompt
+		// (typically a personality bundle) is additive, not authoritative.
+		args = append(args, "--append-system-prompt", req.AppendSystemPrompt)
 	}
 
 	if len(p.AllowedTools) > 0 {

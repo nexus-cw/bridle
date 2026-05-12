@@ -59,7 +59,7 @@ func (p *Provider) getClient() *openai.Client {
 
 // RunTurn calls the OpenAI Chat Completions API and emits bridle events to sink.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
-	messages := toOpenAIMessages(req.SystemPrompt, req.Messages)
+	messages := toOpenAIMessages(req.AppendSystemPrompt, req.Messages)
 	tools := toOpenAITools(req.Tools)
 
 	params := openai.ChatCompletionNewParams{
