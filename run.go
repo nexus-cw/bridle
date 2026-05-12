@@ -148,6 +148,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 				Role:       "tool_result",
 				Content:    resultStr,
 				ToolCallID: call.ID,
+				ToolName:   call.Name, // required by Gemini's FunctionResponse contract; ignored by other providers
 			})
 			sessionDelta = append(sessionDelta, SessionEvent{Provider: h.provider.Name(), Role: RoleTool, Content: resultStr})
 		}
