@@ -172,6 +172,18 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			break
 		}
 
+		// Reconstruct the assistant turn that emitted those tool_use blocks
+		// before appending the tool_results. Bedrock (and strict providers)
+		// require assistant{tool_use} → user{tool_result} alternation; sending
+		// tool_results without the preceding assistant turn is rejected.
+		// finalText may be empty for tool-only assistant turns — that's fine,
+		// providers emit a content-less assistant message with just tool_use.
+		preq.Messages = append(preq.Messages, ProviderMessage{
+			Role:      "assistant",
+			Content:   finalText,
+			ToolCalls: presult.ToolCalls,
+		})
+
 		// Append tool results to message history.
 		preq.Messages = append(preq.Messages, toolMessages...)
 

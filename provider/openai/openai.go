@@ -8,6 +8,7 @@ import (
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/shared"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
@@ -139,7 +140,27 @@ func toOpenAIMessages(systemPrompt string, msgs []bridle.ProviderMessage) []open
 		case "user":
 			out = append(out, openai.UserMessage(m.Content))
 		case "assistant":
-			out = append(out, openai.AssistantMessage(m.Content))
+			if m.Content == "" && len(m.ToolCalls) == 0 {
+				continue
+			}
+			var assistant openai.ChatCompletionAssistantMessageParam
+			if m.Content != "" {
+				assistant.Content.OfString = param.NewOpt(m.Content)
+			}
+			if len(m.ToolCalls) > 0 {
+				tcs := make([]openai.ChatCompletionMessageToolCallParam, 0, len(m.ToolCalls))
+				for _, tc := range m.ToolCalls {
+					tcs = append(tcs, openai.ChatCompletionMessageToolCallParam{
+						ID: tc.ID,
+						Function: openai.ChatCompletionMessageToolCallFunctionParam{
+							Name:      tc.Name,
+							Arguments: string(tc.Args),
+						},
+					})
+				}
+				assistant.ToolCalls = tcs
+			}
+			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &assistant})
 		case "tool_result":
 			out = append(out, openai.ToolMessage(m.Content, m.ToolCallID))
 		case "system":

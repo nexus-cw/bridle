@@ -63,11 +63,21 @@ type ProviderRequest struct {
 // declaration name, not by call id. Providers that key only by call id
 // (Anthropic, OpenAI, Ollama) ignore ToolName and the field can be left
 // empty without harm.
+//
+// For Role == "assistant", ToolCalls carries the structured tool_use
+// blocks the model emitted on this turn. Providers that send assistant
+// history back to the model (claude, openai, gemini, bedrock) MUST
+// reconstruct these as native tool_use blocks; sending only Content as
+// plain text loses the tool-call structure and breaks multi-turn tool
+// conversations on strict providers (Bedrock rejects, Anthropic and
+// OpenAI are lenient but degrade). Content and ToolCalls can both be
+// non-empty — text and tool_use blocks coexist in one assistant turn.
 type ProviderMessage struct {
 	Role       string // "user" | "assistant" | "tool_result" | "system"
 	Content    string
-	ToolCallID string // links a tool_result back to the call that produced it
-	ToolName   string // function-declaration name; required for tool_result on Gemini
+	ToolCallID string           // links a tool_result back to the call that produced it
+	ToolName   string           // function-declaration name; required for tool_result on Gemini
+	ToolCalls  []ToolInvocation // tool_use blocks for assistant turns; nil on other roles
 }
 
 // ProviderResult is the harness-internal result from one provider turn step.
