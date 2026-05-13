@@ -284,6 +284,7 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 		Session:      req.Session,
 		Messages:     messages,
 		Tools:        req.Tools,
+		ToolChoice:   req.ToolChoice,
 		MCP:          req.MCP,
 		MaxSteps:     req.MaxSteps,
 		Model:        req.Model,

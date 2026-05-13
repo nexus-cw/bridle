@@ -187,7 +187,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 			&types.SystemContentBlockMemberText{Value: req.AppendSystemPrompt},
 		}
 	}
-	if toolCfg, err := toBedrockTools(req.Tools); err != nil {
+	if toolCfg, err := toBedrockTools(req.Tools, req.ToolChoice, p.EnablePromptCaching); err != nil {
 		return bridle.ProviderResult{}, err
 	} else if toolCfg != nil {
 		in.ToolConfig = toolCfg
@@ -373,11 +373,11 @@ func toBedrockMessages(msgs []bridle.ProviderMessage, enableCache bool) ([]types
 	return out, nil
 }
 
-func toBedrockTools(defs []bridle.ToolDef) (*types.ToolConfiguration, error) {
+func toBedrockTools(defs []bridle.ToolDef, choice string, enableCache bool) (*types.ToolConfiguration, error) {
 	if len(defs) == 0 {
 		return nil, nil
 	}
-	tools := make([]types.Tool, 0, len(defs))
+	tools := make([]types.Tool, 0, len(defs)+1)
 	for _, d := range defs {
 		spec := types.ToolSpecification{
 			Name: aws.String(d.Name),
@@ -396,7 +396,28 @@ func toBedrockTools(defs []bridle.ToolDef) (*types.ToolConfiguration, error) {
 		}
 		tools = append(tools, &types.ToolMemberToolSpec{Value: spec})
 	}
-	return &types.ToolConfiguration{Tools: tools}, nil
+	if enableCache {
+		tools = append(tools, &types.ToolMemberCachePoint{
+			Value: types.CachePointBlock{Type: types.CachePointTypeDefault},
+		})
+	}
+	cfg := &types.ToolConfiguration{Tools: tools}
+	switch choice {
+	case "", "auto":
+		cfg.ToolChoice = &types.ToolChoiceMemberAuto{Value: types.AutoToolChoice{}}
+	case "any":
+		cfg.ToolChoice = &types.ToolChoiceMemberAny{Value: types.AnyToolChoice{}}
+	case "none":
+		// Bedrock has no explicit "none" — return tools without a choice and
+		// the model may still call one. For strict no-tools, the caller
+		// should pass req.Tools = nil. Document and fall through to auto.
+		cfg.ToolChoice = &types.ToolChoiceMemberAuto{Value: types.AutoToolChoice{}}
+	default:
+		cfg.ToolChoice = &types.ToolChoiceMemberTool{
+			Value: types.SpecificToolChoice{Name: aws.String(choice)},
+		}
+	}
+	return cfg, nil
 }
 
 // documentToJSON marshals a smithy document.Interface back to JSON bytes.
