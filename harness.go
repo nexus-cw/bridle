@@ -29,6 +29,13 @@ const (
 	StopReasonMaxSteps  StopReason = "max_steps"
 	StopReasonError     StopReason = "error"
 	StopReasonAborted   StopReason = "aborted"
+	// StopReasonProcessExit is set when the underlying provider process
+	// exited non-zero AFTER producing parseable assistant content. The
+	// returned ProviderResult carries whatever the model said before
+	// the exit — callers should treat the result as truncated-but-real,
+	// not discard it. Common cause: hitting an output-token cap and the
+	// CLI surfacing that as a non-zero exit rather than a clean stop.
+	StopReasonProcessExit StopReason = "process_exit"
 )
 
 // Usage holds token and cost data for a turn.

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -29,6 +30,20 @@ import (
 
 const providerID bridle.ProviderID = "claude-code"
 
+// systemPromptSpillThresholdBytes is the body length above which we write
+// the system prompt to a tempfile and pass --append-system-prompt-file
+// instead of inlining via --append-system-prompt. Windows CreateProcess
+// caps total argv at ~32K; the system prompt is the single largest
+// contributor in Frame-class callers (central nexus_md + NEXUS.md +
+// SOUL.md + PRIMER + roster + toolkit blurbs). 8K leaves ~24K headroom
+// for every other argv field (-p body, --allowedTools, --session-id,
+// ExtraArgs), which is enough by a wide margin.
+//
+// Observed 2026-05-13: keel's Frame composition crossed 32K once roster
+// + toolkit blurbs were added, manifesting as the misleading kernel
+// error "filename or extension is too long". See task #674.
+const systemPromptSpillThresholdBytes = 8 * 1024
+
 // Provider implements bridle.Provider by shelling out to the claude CLI.
 type Provider struct {
 	// ClaudePath is the path to the claude binary. Defaults to "claude" (PATH lookup).
@@ -37,6 +52,13 @@ type Provider struct {
 	AllowedTools []string
 	// ExtraArgs are appended verbatim to the claude invocation.
 	ExtraArgs []string
+	// Bare, when true, passes --bare to the CLI. Bare mode skips hooks,
+	// LSP, plugin sync, attribution, auto-memory, keychain reads, and
+	// CLAUDE.md auto-discovery. Intended for short-lived subprocess
+	// callers (e.g. cheap-judge subprocesses) that want a minimal CLI
+	// surface and don't need user-level state. Context must be supplied
+	// explicitly via --append-system-prompt[-file] / --add-dir / etc.
+	Bare bool
 }
 
 // New returns a claudecode Provider with default settings.
@@ -107,14 +129,28 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	// OS-level sandboxing — bridle defers to the runtime, not provider.
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
 
+	// systemPromptFile is set (non-empty) when we spill the system
+	// prompt to disk so we can delete it after the CLI exits. Kept in
+	// scope so cleanup runs whether the call returns via the happy
+	// path, parse error, or context cancellation.
+	var systemPromptFile string
+	defer func() {
+		if systemPromptFile != "" {
+			_ = os.Remove(systemPromptFile)
+		}
+	}()
+
 	if req.AppendSystemPrompt != "" {
-		// --append-system-prompt (not --system-prompt) preserves Anthropic's
-		// default system prompt — toolkit awareness, skill discovery, conversation
-		// patterns, behavioral defaults — and layers the caller's prompt on top.
-		// --system-prompt would REPLACE those defaults entirely, which silently
-		// neuters tool-use prompting and skill enumeration. The caller's prompt
-		// (typically a personality bundle) is additive, not authoritative.
-		args = append(args, "--append-system-prompt", req.AppendSystemPrompt)
+		spillArgs, file, perr := appendSystemPromptArgs(req.AppendSystemPrompt)
+		if perr != nil {
+			return bridle.ProviderResult{}, perr
+		}
+		systemPromptFile = file
+		args = append(args, spillArgs...)
+	}
+
+	if p.Bare {
+		args = append(args, "--bare")
 	}
 
 	// Allowed tools: per-turn list from the funnel (req.Tools.Name) takes
@@ -229,6 +265,18 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	if waitErr != nil && parseErr == nil {
 		if ctx.Err() != nil {
 			result.StopReason = bridle.StopReasonAborted
+		} else if result.FinalText != "" || len(result.ToolCalls) > 0 || len(result.SessionDelta) > 0 {
+			// Subprocess exited non-zero AFTER producing parseable
+			// content — common cause: output-token cap hit, CLI surfaces
+			// it as exit 1 rather than a clean stop. Preserve the partial
+			// result so the funnel can still auto-post what the model
+			// said. Without this, ~10KB of substantive output gets
+			// silently dropped because we return ProviderResult{} (#219).
+			result.StopReason = bridle.StopReasonProcessExit
+			sink.Emit(bridle.TurnError{
+				Err:   fmt.Errorf("claudecode: subprocess exited non-zero with partial content: %w", waitErr),
+				Stage: "subprocess_exit_partial",
+			})
 		} else {
 			sink.Emit(bridle.TurnError{Err: fmt.Errorf("claudecode: %w", waitErr), Stage: "subprocess_exit"})
 			return bridle.ProviderResult{}, fmt.Errorf("claudecode: CLI error: %w (stderr: %s)", waitErr, stderr.String())
@@ -412,6 +460,39 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 		StopReason:   stopReason,
 		SessionDelta: sessionDelta,
 	}, nil
+}
+
+// appendSystemPromptArgs returns the CLI args for the caller's
+// AppendSystemPrompt body, plus the tempfile path used (or "" if the
+// inline form was taken). Callers are responsible for deleting the
+// tempfile after the subprocess exits.
+//
+// --append-system-prompt (inline) is used when the body fits within
+// systemPromptSpillThresholdBytes. Beyond that we spill to a tempfile
+// and pass --append-system-prompt-file, keeping argv well under
+// Windows CreateProcess's 32K ceiling. See task #674 and the const
+// docstring for the why.
+//
+// The body must be non-empty; appendSystemPromptArgs assumes the
+// caller already checked.
+func appendSystemPromptArgs(body string) ([]string, string, error) {
+	if len(body) <= systemPromptSpillThresholdBytes {
+		return []string{"--append-system-prompt", body}, "", nil
+	}
+	f, err := os.CreateTemp("", "bridle-sysprompt-*.txt")
+	if err != nil {
+		return nil, "", fmt.Errorf("claudecode: tempfile for system prompt: %w", err)
+	}
+	if _, err := f.WriteString(body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, "", fmt.Errorf("claudecode: write system prompt tempfile: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return nil, "", fmt.Errorf("claudecode: close system prompt tempfile: %w", err)
+	}
+	return []string{"--append-system-prompt-file", f.Name()}, f.Name(), nil
 }
 
 // buildPrompt returns the current turn's user message for the CLI's -p arg.
