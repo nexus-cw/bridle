@@ -186,6 +186,11 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		in.System = []types.SystemContentBlock{
 			&types.SystemContentBlockMemberText{Value: req.AppendSystemPrompt},
 		}
+		if p.EnablePromptCaching {
+			in.System = append(in.System, &types.SystemContentBlockMemberCachePoint{
+				Value: types.CachePointBlock{Type: types.CachePointTypeDefault},
+			})
+		}
 	}
 	if toolCfg, err := toBedrockTools(req.Tools, req.ToolChoice, p.EnablePromptCaching); err != nil {
 		return bridle.ProviderResult{}, err
@@ -256,6 +261,12 @@ func extractResult(resp *bedrockruntime.ConverseOutput, sink bridle.EventSink) (
 	if resp.Usage != nil {
 		usage.InputTokens = int(aws.ToInt32(resp.Usage.InputTokens))
 		usage.OutputTokens = int(aws.ToInt32(resp.Usage.OutputTokens))
+		if resp.Usage.CacheReadInputTokens != nil {
+			usage.CacheReadInputTokens = int(aws.ToInt32(resp.Usage.CacheReadInputTokens))
+		}
+		if resp.Usage.CacheWriteInputTokens != nil {
+			usage.CacheCreationInputTokens = int(aws.ToInt32(resp.Usage.CacheWriteInputTokens))
+		}
 	}
 
 	rawStop := string(resp.StopReason)
