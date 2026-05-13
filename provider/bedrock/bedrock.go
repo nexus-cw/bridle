@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,14 +29,51 @@ import (
 	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
 )
 
+// converseClient is the minimal Bedrock client surface bedrock.Provider uses.
+// Real callers get the concrete *bedrockruntime.Client; tests substitute a fake.
+type converseClient interface {
+	Converse(ctx context.Context, in *bedrockruntime.ConverseInput, opts ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error)
+	ConverseStream(ctx context.Context, in *bedrockruntime.ConverseStreamInput, opts ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseStreamOutput, error)
+}
+
 // Provider implements bridle.Provider for AWS Bedrock via the Converse API.
+//
+// Concurrency: safe for use across goroutines. The internal client is built
+// lazily and reused; getClient serializes init on p.mu.
 type Provider struct {
 	mu        sync.Mutex
-	client    *bedrockruntime.Client
+	client    converseClient
 	clientErr error // cached for permanent failures only; ctx errors are not cached
 	region    string
+
 	// Profile selects an AWS shared-config profile (overrides AWS_PROFILE if set).
 	Profile string
+
+	// Endpoint overrides the Bedrock service endpoint URL. Maps to the SDK's
+	// BaseEndpoint option. Use for enterprise gateways that front Bedrock
+	// with a corporate URL but still expect SigV4 signing. Leave empty for
+	// the standard regional endpoint.
+	Endpoint string
+
+	// HTTPClient overrides the SDK's default HTTP transport. Use to inject
+	// a corporate CA bundle, a proxy, or custom TLS for enterprise deploys.
+	// Leave nil to use the SDK default.
+	HTTPClient *http.Client
+
+	// Inference parameters. All optional — zero values fall through to the
+	// model's Bedrock default. MaxTokens defaults to 4096 if unset (matches
+	// provider/claude/claude.go for Anthropic models).
+	MaxTokens     int32    // 0 → 4096
+	Temperature   *float32 // nil → model default
+	TopP          *float32 // nil → model default
+	StopSequences []string // empty → no caller-defined stop sequences
+
+	// EnablePromptCaching, when true, emits CachePoint blocks at strategic
+	// positions (after system prompt, after tool definitions, after each
+	// tool_result batch) so Anthropic models on Bedrock can hit the prompt
+	// cache. Bedrock supports up to 4 cache breakpoints; we stay within that.
+	// Non-Anthropic models ignore cache points cleanly.
+	EnablePromptCaching bool
 }
 
 // New returns a Bedrock provider. Region falls back to AWS_REGION env if empty.
@@ -44,7 +83,11 @@ func New(region string) *Provider {
 }
 
 // NewWithClient returns a Bedrock provider using a pre-configured client.
-func NewWithClient(client *bedrockruntime.Client) *Provider {
+// Use for advanced setups (custom credential providers, smithy middleware,
+// non-SigV4 auth) where the constructor's Endpoint/HTTPClient fields are
+// insufficient. The provided client must satisfy bridle's converseClient
+// surface — concrete *bedrockruntime.Client does.
+func NewWithClient(client converseClient) *Provider {
 	return &Provider{client: client}
 }
 
@@ -68,7 +111,7 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 // no fallback, etc.) is cached so subsequent callers fail fast. Context
 // cancellation / deadline-exceeded errors are NOT cached — a transient ctx
 // failure on the first call must not permanently brick a long-lived Provider.
-func (p *Provider) getClient(ctx context.Context) (*bedrockruntime.Client, error) {
+func (p *Provider) getClient(ctx context.Context) (converseClient, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.client != nil {
@@ -84,6 +127,9 @@ func (p *Provider) getClient(ctx context.Context) (*bedrockruntime.Client, error
 	if p.Profile != "" {
 		opts = append(opts, awsconfig.WithSharedConfigProfile(p.Profile))
 	}
+	if p.HTTPClient != nil {
+		opts = append(opts, awsconfig.WithHTTPClient(p.HTTPClient))
+	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		wrapped := fmt.Errorf("bedrock: load aws config: %w", err)
@@ -93,7 +139,13 @@ func (p *Provider) getClient(ctx context.Context) (*bedrockruntime.Client, error
 		}
 		return nil, wrapped
 	}
-	p.client = bedrockruntime.NewFromConfig(cfg)
+	clientOpts := []func(*bedrockruntime.Options){}
+	if p.Endpoint != "" {
+		clientOpts = append(clientOpts, func(o *bedrockruntime.Options) {
+			o.BaseEndpoint = aws.String(p.Endpoint)
+		})
+	}
+	p.client = bedrockruntime.NewFromConfig(cfg, clientOpts...)
 	return p.client, nil
 }
 
@@ -104,7 +156,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, err
 	}
 
-	messages, err := toBedrockMessages(req.Messages)
+	messages, err := toBedrockMessages(req.Messages, p.EnablePromptCaching)
 	if err != nil {
 		return bridle.ProviderResult{}, err
 	}
@@ -113,138 +165,233 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		ModelId:  aws.String(req.Model),
 		Messages: messages,
 	}
+
+	maxTokens := p.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = 4096
+	}
+	in.InferenceConfig = &types.InferenceConfiguration{
+		MaxTokens: aws.Int32(maxTokens),
+	}
+	if p.Temperature != nil {
+		in.InferenceConfig.Temperature = p.Temperature
+	}
+	if p.TopP != nil {
+		in.InferenceConfig.TopP = p.TopP
+	}
+	if len(p.StopSequences) > 0 {
+		in.InferenceConfig.StopSequences = p.StopSequences
+	}
+
 	if req.AppendSystemPrompt != "" {
 		in.System = []types.SystemContentBlock{
 			&types.SystemContentBlockMemberText{Value: req.AppendSystemPrompt},
 		}
+		if p.EnablePromptCaching {
+			in.System = append(in.System, &types.SystemContentBlockMemberCachePoint{
+				Value: types.CachePointBlock{Type: types.CachePointTypeDefault},
+			})
+		}
 	}
-	if toolCfg, err := toBedrockTools(req.Tools); err != nil {
+	// ToolChoice "none" means "no tools may be called this turn" per
+	// the TurnRequest contract. Bedrock Converse has no native "none"
+	// value, so honour the contract by dropping the tool list entirely
+	// rather than sending tools+auto (which the model can still call).
+	tools := req.Tools
+	if req.ToolChoice == "none" {
+		tools = nil
+	}
+	if toolCfg, err := toBedrockTools(tools, req.ToolChoice, p.EnablePromptCaching); err != nil {
 		return bridle.ProviderResult{}, err
 	} else if toolCfg != nil {
 		in.ToolConfig = toolCfg
 	}
 
-	resp, err := client.Converse(ctx, in)
-	if err != nil {
-		return bridle.ProviderResult{}, fmt.Errorf("bedrock: Converse: %w", err)
+	streamIn := &bedrockruntime.ConverseStreamInput{
+		ModelId:         in.ModelId,
+		Messages:        in.Messages,
+		System:          in.System,
+		InferenceConfig: in.InferenceConfig,
+		ToolConfig:      in.ToolConfig,
 	}
-
-	return extractResult(resp, sink)
+	streamOut, err := client.ConverseStream(ctx, streamIn)
+	if err != nil {
+		return bridle.ProviderResult{}, fmt.Errorf("bedrock: ConverseStream: %w", err)
+	}
+	return extractStreamResult(ctx, streamOut, sink)
 }
 
-func extractResult(resp *bedrockruntime.ConverseOutput, sink bridle.EventSink) (bridle.ProviderResult, error) {
-	if resp == nil || resp.Output == nil {
-		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
+// extractStreamResult drains the ConverseStream event stream into a
+// ProviderResult while emitting ModelChunk / ToolCallStart events to sink
+// as they arrive. Event shapes per the Bedrock Converse streaming docs:
+//
+//   - MessageStart           — top-level role
+//   - ContentBlockStart      — begin of a content block (text or tool_use)
+//   - ContentBlockDelta      — partial text or partial tool_use input JSON
+//   - ContentBlockStop       — end of a content block
+//   - MessageStop            — top-level stop_reason
+//   - Metadata               — usage + trace
+//
+// Each ContentBlock has an Index that ties Start/Delta/Stop together.
+func extractStreamResult(ctx context.Context, out *bedrockruntime.ConverseStreamOutput, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	_ = ctx
+	stream := out.GetStream()
+	defer stream.Close()
+
+	var (
+		finalText    strings.Builder
+		toolCalls    []bridle.ToolInvocation
+		sessionDelta []bridle.SessionEvent
+		usage        bridle.Usage
+		rawStop      string
+	)
+
+	type blockState struct {
+		kind      string // "text" | "tool_use"
+		toolID    string
+		toolName  string
+		toolInput strings.Builder
+		textBuf   strings.Builder
 	}
+	blocks := map[int32]*blockState{}
 
-	msgWrap, ok := resp.Output.(*types.ConverseOutputMemberMessage)
-	if !ok || msgWrap == nil {
-		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
-	}
-	msg := msgWrap.Value
-
-	var finalText string
-	var toolCalls []bridle.ToolInvocation
-	var sessionDelta []bridle.SessionEvent
-
-	for _, block := range msg.Content {
-		switch b := block.(type) {
-		case *types.ContentBlockMemberText:
-			sink.Emit(bridle.ModelChunk{Text: b.Value})
-			finalText += b.Value
-			sessionDelta = append(sessionDelta, bridle.SessionEvent{
-				Provider: bridle.ProviderBedrock,
-				Role:     bridle.RoleAssistant,
-				Content:  b.Value,
-			})
-
-		case *types.ContentBlockMemberToolUse:
-			argsJSON, jerr := documentToJSON(b.Value.Input)
-			if jerr != nil {
-				return bridle.ProviderResult{}, jerr
+	for event := range stream.Events() {
+		switch ev := event.(type) {
+		case *types.ConverseStreamOutputMemberContentBlockStart:
+			idx := aws.ToInt32(ev.Value.ContentBlockIndex)
+			bs := &blockState{}
+			if tu, ok := ev.Value.Start.(*types.ContentBlockStartMemberToolUse); ok {
+				bs.kind = "tool_use"
+				bs.toolID = aws.ToString(tu.Value.ToolUseId)
+				bs.toolName = aws.ToString(tu.Value.Name)
+				sink.Emit(bridle.ToolCallStart{ID: bs.toolID, Name: bs.toolName})
+			} else {
+				bs.kind = "text"
 			}
-			id := aws.ToString(b.Value.ToolUseId)
-			name := aws.ToString(b.Value.Name)
-			toolCalls = append(toolCalls, bridle.ToolInvocation{
-				ID:   id,
-				Name: name,
-				Args: argsJSON,
-			})
-			raw, _ := json.Marshal(map[string]any{
-				"toolUseId": id,
-				"name":      name,
-				"input":     json.RawMessage(argsJSON),
-			})
-			sessionDelta = append(sessionDelta, bridle.SessionEvent{
-				Provider: bridle.ProviderBedrock,
-				Role:     bridle.RoleAssistant,
-				RawJSON:  raw,
-			})
+			blocks[idx] = bs
+
+		case *types.ConverseStreamOutputMemberContentBlockDelta:
+			idx := aws.ToInt32(ev.Value.ContentBlockIndex)
+			bs, ok := blocks[idx]
+			if !ok {
+				bs = &blockState{kind: "text"}
+				blocks[idx] = bs
+			}
+			switch d := ev.Value.Delta.(type) {
+			case *types.ContentBlockDeltaMemberText:
+				sink.Emit(bridle.ModelChunk{Text: d.Value})
+				finalText.WriteString(d.Value)
+				bs.textBuf.WriteString(d.Value)
+			case *types.ContentBlockDeltaMemberToolUse:
+				bs.toolInput.WriteString(aws.ToString(d.Value.Input))
+			}
+
+		case *types.ConverseStreamOutputMemberContentBlockStop:
+			idx := aws.ToInt32(ev.Value.ContentBlockIndex)
+			bs, ok := blocks[idx]
+			if !ok {
+				continue
+			}
+			switch bs.kind {
+			case "text":
+				if bs.textBuf.Len() > 0 {
+					sessionDelta = append(sessionDelta, bridle.SessionEvent{
+						Provider: bridle.ProviderBedrock,
+						Role:     bridle.RoleAssistant,
+						Content:  bs.textBuf.String(),
+					})
+				}
+			case "tool_use":
+				args := json.RawMessage(bs.toolInput.String())
+				if len(args) == 0 {
+					args = json.RawMessage("{}")
+				}
+				toolCalls = append(toolCalls, bridle.ToolInvocation{
+					ID:   bs.toolID,
+					Name: bs.toolName,
+					Args: args,
+				})
+				raw, _ := json.Marshal(map[string]any{
+					"toolUseId": bs.toolID,
+					"name":      bs.toolName,
+					"input":     args,
+				})
+				sessionDelta = append(sessionDelta, bridle.SessionEvent{
+					Provider: bridle.ProviderBedrock,
+					Role:     bridle.RoleAssistant,
+					RawJSON:  raw,
+				})
+			}
+			delete(blocks, idx)
+
+		case *types.ConverseStreamOutputMemberMessageStop:
+			rawStop = string(ev.Value.StopReason)
+
+		case *types.ConverseStreamOutputMemberMetadata:
+			if ev.Value.Usage != nil {
+				usage.InputTokens = int(aws.ToInt32(ev.Value.Usage.InputTokens))
+				usage.OutputTokens = int(aws.ToInt32(ev.Value.Usage.OutputTokens))
+				if ev.Value.Usage.CacheReadInputTokens != nil {
+					usage.CacheReadInputTokens = int(aws.ToInt32(ev.Value.Usage.CacheReadInputTokens))
+				}
+				if ev.Value.Usage.CacheWriteInputTokens != nil {
+					usage.CacheCreationInputTokens = int(aws.ToInt32(ev.Value.Usage.CacheWriteInputTokens))
+				}
+			}
 		}
 	}
 
-	usage := bridle.Usage{}
-	if resp.Usage != nil {
-		usage.InputTokens = int(aws.ToInt32(resp.Usage.InputTokens))
-		usage.OutputTokens = int(aws.ToInt32(resp.Usage.OutputTokens))
+	if err := stream.Err(); err != nil {
+		return bridle.ProviderResult{StopReason: bridle.StopReasonError},
+			fmt.Errorf("bedrock: stream: %w", err)
 	}
 
-	rawStop := string(resp.StopReason)
-	stopReason := bridle.StopReason(normalize.BedrockStopReason(rawStop))
-
-	result := bridle.ProviderResult{
-		FinalText:    finalText,
-		ToolCalls:    toolCalls,
-		Usage:        usage,
-		StopReason:   stopReason,
-		SessionDelta: sessionDelta,
-	}
-
-	// Safety stops surface as a non-nil error so harness callers can
-	// distinguish a model that completed normally from one that was blocked.
-	// StopReason stays as StopReasonError to match.
 	if rawStop == string(types.StopReasonGuardrailIntervened) {
-		return result, fmt.Errorf("bedrock: guardrail_intervened: response blocked by configured guardrail")
+		return bridle.ProviderResult{StopReason: bridle.StopReasonError},
+			fmt.Errorf("bedrock: guardrail_intervened: response blocked by configured guardrail")
 	}
 	if rawStop == string(types.StopReasonContentFiltered) {
-		return result, fmt.Errorf("bedrock: content_filtered: response blocked by content filter")
+		return bridle.ProviderResult{StopReason: bridle.StopReasonError},
+			fmt.Errorf("bedrock: content_filtered: response blocked by content filter")
 	}
 
-	return result, nil
+	return bridle.ProviderResult{
+		FinalText:    finalText.String(),
+		ToolCalls:    toolCalls,
+		Usage:        usage,
+		StopReason:   bridle.StopReason(normalize.BedrockStopReason(rawStop)),
+		SessionDelta: sessionDelta,
+	}, nil
 }
 
 // toBedrockMessages flattens bridle ProviderMessages into Bedrock Converse
-// messages. Consecutive tool_result entries are grouped into a single
-// user-role message containing multiple ToolResultBlocks — Bedrock rejects
-// requests that send each tool_result as its own user turn (consecutive
-// same-role messages are invalid in the Converse contract).
+// messages. Bedrock requires strict user/assistant alternation, where
+// tool_result is a user content block. We accumulate user-role blocks
+// (text + tool_result) into pendingUserBlocks and flush them as a single
+// user message only when we hit an assistant turn or end of stream.
 //
-// Pre-existing harness limitation: prior assistant turns that contained
-// tool_use blocks are surfaced here as Role=assistant + Content=text only
-// (ProviderMessage doesn't carry RawJSON). Multi-turn tool conversations
-// where the model has to see its own past tool_use calls reconstructed will
-// fail at the Bedrock validation layer until ProviderMessage gains a
-// structured tool-call-history field — that's a bridle harness change, not
-// a provider-local fix.
-func toBedrockMessages(msgs []bridle.ProviderMessage) ([]types.Message, error) {
+// Assistant turns are emitted with both text content and reconstructed
+// tool_use blocks (from ProviderMessage.ToolCalls, populated by the
+// harness in run.go's tool loop).
+func toBedrockMessages(msgs []bridle.ProviderMessage, enableCache bool) ([]types.Message, error) {
 	out := make([]types.Message, 0, len(msgs))
-	var pendingToolResults []types.ContentBlock
+	var pendingUserBlocks []types.ContentBlock
 
-	flushToolResults := func() {
-		if len(pendingToolResults) == 0 {
+	flushUser := func() {
+		if len(pendingUserBlocks) == 0 {
 			return
 		}
 		out = append(out, types.Message{
 			Role:    types.ConversationRoleUser,
-			Content: pendingToolResults,
+			Content: pendingUserBlocks,
 		})
-		pendingToolResults = nil
+		pendingUserBlocks = nil
 	}
 
 	for _, m := range msgs {
 		switch m.Role {
 		case "tool_result":
-			pendingToolResults = append(pendingToolResults, &types.ContentBlockMemberToolResult{
+			pendingUserBlocks = append(pendingUserBlocks, &types.ContentBlockMemberToolResult{
 				Value: types.ToolResultBlock{
 					ToolUseId: aws.String(m.ToolCallID),
 					Content: []types.ToolResultContentBlock{
@@ -254,36 +401,64 @@ func toBedrockMessages(msgs []bridle.ProviderMessage) ([]types.Message, error) {
 			})
 
 		case "user", "system":
-			flushToolResults()
-			// Converse takes system separately via the System field; if a
-			// ProviderMessage sneaks in with role=system, fold it into a user
-			// turn rather than dropping it.
-			out = append(out, types.Message{
-				Role:    types.ConversationRoleUser,
-				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: m.Content}},
-			})
+			// Both fold into a user content block. System is taken separately
+			// via ConverseInput.System; any system in the message stream is
+			// an inline context note from the harness.
+			if m.Content != "" {
+				pendingUserBlocks = append(pendingUserBlocks, &types.ContentBlockMemberText{Value: m.Content})
+			}
 
 		case "assistant":
-			flushToolResults()
+			flushUser()
+			blocks := []types.ContentBlock{}
+			if m.Content != "" {
+				blocks = append(blocks, &types.ContentBlockMemberText{Value: m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				var input any
+				if len(tc.Args) > 0 {
+					if err := json.Unmarshal(tc.Args, &input); err != nil {
+						return nil, fmt.Errorf("bedrock: tool_use %q args unmarshal: %w", tc.Name, err)
+					}
+				}
+				blocks = append(blocks, &types.ContentBlockMemberToolUse{
+					Value: types.ToolUseBlock{
+						ToolUseId: aws.String(tc.ID),
+						Name:      aws.String(tc.Name),
+						Input:     document.NewLazyDocument(input),
+					},
+				})
+			}
+			if len(blocks) == 0 {
+				continue // skip empty assistant turn rather than send invalid request
+			}
 			out = append(out, types.Message{
 				Role:    types.ConversationRoleAssistant,
-				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: m.Content}},
+				Content: blocks,
 			})
 
 		default:
-			// Unknown role — skip rather than emit garbage.
 			continue
 		}
 	}
-	flushToolResults()
+	flushUser()
+
+	if enableCache && len(out) > 0 {
+		last := &out[len(out)-1]
+		if last.Role == types.ConversationRoleUser {
+			last.Content = append(last.Content, &types.ContentBlockMemberCachePoint{
+				Value: types.CachePointBlock{Type: types.CachePointTypeDefault},
+			})
+		}
+	}
 	return out, nil
 }
 
-func toBedrockTools(defs []bridle.ToolDef) (*types.ToolConfiguration, error) {
+func toBedrockTools(defs []bridle.ToolDef, choice string, enableCache bool) (*types.ToolConfiguration, error) {
 	if len(defs) == 0 {
 		return nil, nil
 	}
-	tools := make([]types.Tool, 0, len(defs))
+	tools := make([]types.Tool, 0, len(defs)+1)
 	for _, d := range defs {
 		spec := types.ToolSpecification{
 			Name: aws.String(d.Name),
@@ -302,22 +477,27 @@ func toBedrockTools(defs []bridle.ToolDef) (*types.ToolConfiguration, error) {
 		}
 		tools = append(tools, &types.ToolMemberToolSpec{Value: spec})
 	}
-	return &types.ToolConfiguration{Tools: tools}, nil
+	if enableCache {
+		tools = append(tools, &types.ToolMemberCachePoint{
+			Value: types.CachePointBlock{Type: types.CachePointTypeDefault},
+		})
+	}
+	cfg := &types.ToolConfiguration{Tools: tools}
+	switch choice {
+	case "", "auto":
+		cfg.ToolChoice = &types.ToolChoiceMemberAuto{Value: types.AutoToolChoice{}}
+	case "any":
+		cfg.ToolChoice = &types.ToolChoiceMemberAny{Value: types.AnyToolChoice{}}
+	case "none":
+		// Bedrock has no explicit "none" — return tools without a choice and
+		// the model may still call one. For strict no-tools, the caller
+		// should pass req.Tools = nil. Document and fall through to auto.
+		cfg.ToolChoice = &types.ToolChoiceMemberAuto{Value: types.AutoToolChoice{}}
+	default:
+		cfg.ToolChoice = &types.ToolChoiceMemberTool{
+			Value: types.SpecificToolChoice{Name: aws.String(choice)},
+		}
+	}
+	return cfg, nil
 }
 
-// documentToJSON marshals a smithy document.Interface back to JSON bytes.
-// Used for tool-call inputs which arrive as opaque documents on the wire.
-func documentToJSON(d document.Interface) (json.RawMessage, error) {
-	if d == nil {
-		return json.RawMessage("{}"), nil
-	}
-	var v any
-	if err := d.UnmarshalSmithyDocument(&v); err != nil {
-		return nil, fmt.Errorf("bedrock: tool input unmarshal: %w", err)
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("bedrock: tool input marshal: %w", err)
-	}
-	return b, nil
-}

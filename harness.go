@@ -98,6 +98,15 @@ type TurnRequest struct {
 	Model    string     // REQUIRED — provider-specific model id; RunTurn returns ErrModelRequired if empty
 	MaxSteps int        // hard cap on tool-call rounds; 0 = unlimited
 
+	// ToolChoice optionally constrains how the model picks tools.
+	// Empty string → provider default (typically "auto").
+	// "auto" → model decides whether to call a tool.
+	// "any" → model must call exactly one tool, free choice of which.
+	// "none" → no tools may be called this turn (text only).
+	// Any other value → name of a specific tool that must be called.
+	// Not all providers honour all values; unsupported values fall back to "auto".
+	ToolChoice string
+
 	// Cwd is the working directory for subprocess-style providers
 	// (currently claude-code). Empty falls through to the bridle host
 	// process's cwd. Per-request rather than per-Harness because

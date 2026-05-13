@@ -42,6 +42,7 @@ type ProviderRequest struct {
 	Session      SessionHandle  // for subprocess-stream: resume key; for direct-api: may be empty
 	Messages     []ProviderMessage
 	Tools        []ToolDef
+	ToolChoice   string            // see TurnRequest.ToolChoice
 	MCP          *MCPClientConfig  // nil = no MCP tools
 	MaxSteps     int
 	Model        string
