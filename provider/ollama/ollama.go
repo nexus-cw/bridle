@@ -148,8 +148,27 @@ func toOllamaMessages(msgs []bridle.ProviderMessage) []api.Message {
 	out := make([]api.Message, 0, len(msgs))
 	for _, m := range msgs {
 		switch m.Role {
-		case "user", "assistant", "system":
+		case "user", "system":
 			out = append(out, api.Message{Role: m.Role, Content: m.Content})
+		case "assistant":
+			msg := api.Message{Role: "assistant", Content: m.Content}
+			for _, tc := range m.ToolCalls {
+				var args api.ToolCallFunctionArguments
+				if len(tc.Args) > 0 {
+					_ = args.UnmarshalJSON(tc.Args)
+				}
+				msg.ToolCalls = append(msg.ToolCalls, api.ToolCall{
+					ID: tc.ID,
+					Function: api.ToolCallFunction{
+						Name:      tc.Name,
+						Arguments: args,
+					},
+				})
+			}
+			if msg.Content == "" && len(msg.ToolCalls) == 0 {
+				continue
+			}
+			out = append(out, msg)
 		case "tool_result":
 			out = append(out, api.Message{
 				Role:       "tool",
