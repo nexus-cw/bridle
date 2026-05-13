@@ -192,9 +192,27 @@ func toGeminiContents(msgs []bridle.ProviderMessage) []*genai.Content {
 				Parts: []*genai.Part{{Text: m.Content}},
 			})
 		case "assistant":
+			parts := []*genai.Part{}
+			if m.Content != "" {
+				parts = append(parts, &genai.Part{Text: m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				var args map[string]any
+				_ = json.Unmarshal(tc.Args, &args)
+				parts = append(parts, &genai.Part{
+					FunctionCall: &genai.FunctionCall{
+						ID:   tc.ID,
+						Name: tc.Name,
+						Args: args,
+					},
+				})
+			}
+			if len(parts) == 0 {
+				continue
+			}
 			out = append(out, &genai.Content{
 				Role:  "model",
-				Parts: []*genai.Part{{Text: m.Content}},
+				Parts: parts,
 			})
 		case "tool_result":
 			// Gemini's FunctionResponse requires Name to match the
