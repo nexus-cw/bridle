@@ -144,9 +144,18 @@ func toClaudeMessages(msgs []bridle.ProviderMessage) ([]anthropic.MessageParam, 
 				anthropic.NewTextBlock(m.Content),
 			))
 		case "assistant":
-			out = append(out, anthropic.NewAssistantMessage(
-				anthropic.NewTextBlock(m.Content),
-			))
+			blocks := []anthropic.ContentBlockParamUnion{}
+			if m.Content != "" {
+				blocks = append(blocks, anthropic.NewTextBlock(m.Content))
+			}
+			for _, tc := range m.ToolCalls {
+				blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, tc.Args, tc.Name))
+			}
+			if len(blocks) == 0 {
+				// Empty assistant turn — skip rather than emit invalid empty content
+				continue
+			}
+			out = append(out, anthropic.NewAssistantMessage(blocks...))
 		case "tool_result":
 			out = append(out, anthropic.NewUserMessage(
 				anthropic.NewToolResultBlock(m.ToolCallID, m.Content, false),
