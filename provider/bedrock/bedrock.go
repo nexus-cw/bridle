@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,14 +28,51 @@ import (
 	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
 )
 
+// converseClient is the minimal Bedrock client surface bedrock.Provider uses.
+// Real callers get the concrete *bedrockruntime.Client; tests substitute a fake.
+type converseClient interface {
+	Converse(ctx context.Context, in *bedrockruntime.ConverseInput, opts ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error)
+	ConverseStream(ctx context.Context, in *bedrockruntime.ConverseStreamInput, opts ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseStreamOutput, error)
+}
+
 // Provider implements bridle.Provider for AWS Bedrock via the Converse API.
+//
+// Concurrency: safe for use across goroutines. The internal client is built
+// lazily and reused; getClient serializes init on p.mu.
 type Provider struct {
 	mu        sync.Mutex
-	client    *bedrockruntime.Client
+	client    converseClient
 	clientErr error // cached for permanent failures only; ctx errors are not cached
 	region    string
+
 	// Profile selects an AWS shared-config profile (overrides AWS_PROFILE if set).
 	Profile string
+
+	// Endpoint overrides the Bedrock service endpoint URL. Maps to the SDK's
+	// BaseEndpoint option. Use for enterprise gateways that front Bedrock
+	// with a corporate URL but still expect SigV4 signing. Leave empty for
+	// the standard regional endpoint.
+	Endpoint string
+
+	// HTTPClient overrides the SDK's default HTTP transport. Use to inject
+	// a corporate CA bundle, a proxy, or custom TLS for enterprise deploys.
+	// Leave nil to use the SDK default.
+	HTTPClient *http.Client
+
+	// Inference parameters. All optional — zero values fall through to the
+	// model's Bedrock default. MaxTokens defaults to 4096 if unset (matches
+	// provider/claude/claude.go for Anthropic models).
+	MaxTokens     int32    // 0 → 4096
+	Temperature   *float32 // nil → model default
+	TopP          *float32 // nil → model default
+	StopSequences []string // empty → no caller-defined stop sequences
+
+	// EnablePromptCaching, when true, emits CachePoint blocks at strategic
+	// positions (after system prompt, after tool definitions, after each
+	// tool_result batch) so Anthropic models on Bedrock can hit the prompt
+	// cache. Bedrock supports up to 4 cache breakpoints; we stay within that.
+	// Non-Anthropic models ignore cache points cleanly.
+	EnablePromptCaching bool
 }
 
 // New returns a Bedrock provider. Region falls back to AWS_REGION env if empty.
@@ -44,7 +82,11 @@ func New(region string) *Provider {
 }
 
 // NewWithClient returns a Bedrock provider using a pre-configured client.
-func NewWithClient(client *bedrockruntime.Client) *Provider {
+// Use for advanced setups (custom credential providers, smithy middleware,
+// non-SigV4 auth) where the constructor's Endpoint/HTTPClient fields are
+// insufficient. The provided client must satisfy bridle's converseClient
+// surface — concrete *bedrockruntime.Client does.
+func NewWithClient(client converseClient) *Provider {
 	return &Provider{client: client}
 }
 
@@ -68,7 +110,7 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 // no fallback, etc.) is cached so subsequent callers fail fast. Context
 // cancellation / deadline-exceeded errors are NOT cached — a transient ctx
 // failure on the first call must not permanently brick a long-lived Provider.
-func (p *Provider) getClient(ctx context.Context) (*bedrockruntime.Client, error) {
+func (p *Provider) getClient(ctx context.Context) (converseClient, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.client != nil {
@@ -84,6 +126,9 @@ func (p *Provider) getClient(ctx context.Context) (*bedrockruntime.Client, error
 	if p.Profile != "" {
 		opts = append(opts, awsconfig.WithSharedConfigProfile(p.Profile))
 	}
+	if p.HTTPClient != nil {
+		opts = append(opts, awsconfig.WithHTTPClient(p.HTTPClient))
+	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		wrapped := fmt.Errorf("bedrock: load aws config: %w", err)
@@ -93,7 +138,13 @@ func (p *Provider) getClient(ctx context.Context) (*bedrockruntime.Client, error
 		}
 		return nil, wrapped
 	}
-	p.client = bedrockruntime.NewFromConfig(cfg)
+	clientOpts := []func(*bedrockruntime.Options){}
+	if p.Endpoint != "" {
+		clientOpts = append(clientOpts, func(o *bedrockruntime.Options) {
+			o.BaseEndpoint = aws.String(p.Endpoint)
+		})
+	}
+	p.client = bedrockruntime.NewFromConfig(cfg, clientOpts...)
 	return p.client, nil
 }
 
