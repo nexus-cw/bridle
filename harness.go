@@ -82,6 +82,13 @@ type InboxItem struct {
 	Content string
 	MsgID   int64
 	RawJSON json.RawMessage
+
+	// ThreadRoot is the canonical thread identity for the message
+	// (linked-list root id; nexus task #226). The funnel uses it to
+	// key per-thread session state so each thread gets its own
+	// claude-code jsonl, preventing SessionTail bleed across threads.
+	// Zero = legacy/non-chat synthetic item or pre-#226 row.
+	ThreadRoot int64
 }
 
 // TurnRequest is the complete input for one deliberation turn.
