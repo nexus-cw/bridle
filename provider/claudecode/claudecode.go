@@ -414,25 +414,28 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 	}, nil
 }
 
-// buildPrompt assembles the messages into a single prompt string for the CLI.
+// buildPrompt returns the current turn's user message for the CLI's -p arg.
+//
+// Returns ONLY the most recent user message — not the full SessionTail. The
+// claude-code subprocess gets prior conversation history from the session
+// jsonl on --resume <id>, not from argv. Folding SessionTail into -p here
+// would (a) duplicate the history the subprocess is already loading from
+// disk and (b) blow Windows CreateProcess's 32K argv budget once a session
+// accumulates state. Observed 2026-05-13: keel as Frame (global context)
+// crossed 32K after a few turns and every spawn failed with the misleading
+// "filename or extension is too long" kernel error.
+//
+// Direct-API providers (claude-api etc.) need history reassembled because
+// they have no subprocess-owned jsonl — they use toClaudeMessages() in
+// their own provider package, not this function. buildPrompt is
+// claudecode-exclusive by design.
+//
+// See task #216 for full diagnosis.
 func buildPrompt(req bridle.ProviderRequest) string {
-	if len(req.Messages) == 0 {
-		return ""
-	}
-
-	var contextLines []string
-	var userPrompt string
-
-	for i, m := range req.Messages {
-		if m.Role == "user" && i == len(req.Messages)-1 {
-			userPrompt = m.Content
-		} else if m.Content != "" {
-			contextLines = append(contextLines, fmt.Sprintf("[%s]: %s", m.Role, m.Content))
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" {
+			return req.Messages[i].Content
 		}
 	}
-
-	if len(contextLines) == 0 {
-		return userPrompt
-	}
-	return fmt.Sprintf("Prior context:\n%s\n\n%s", strings.Join(contextLines, "\n"), userPrompt)
+	return ""
 }
