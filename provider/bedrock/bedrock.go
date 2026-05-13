@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -198,84 +199,145 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		in.ToolConfig = toolCfg
 	}
 
-	resp, err := client.Converse(ctx, in)
-	if err != nil {
-		return bridle.ProviderResult{}, fmt.Errorf("bedrock: Converse: %w", err)
+	streamIn := &bedrockruntime.ConverseStreamInput{
+		ModelId:         in.ModelId,
+		Messages:        in.Messages,
+		System:          in.System,
+		InferenceConfig: in.InferenceConfig,
+		ToolConfig:      in.ToolConfig,
 	}
-
-	return extractResult(resp, sink)
+	streamOut, err := client.ConverseStream(ctx, streamIn)
+	if err != nil {
+		return bridle.ProviderResult{}, fmt.Errorf("bedrock: ConverseStream: %w", err)
+	}
+	return extractStreamResult(ctx, streamOut, sink)
 }
 
-func extractResult(resp *bedrockruntime.ConverseOutput, sink bridle.EventSink) (bridle.ProviderResult, error) {
-	if resp == nil || resp.Output == nil {
-		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
+// extractStreamResult drains the ConverseStream event stream into a
+// ProviderResult while emitting ModelChunk / ToolCallStart events to sink
+// as they arrive. Event shapes per the Bedrock Converse streaming docs:
+//
+//   - MessageStart           — top-level role
+//   - ContentBlockStart      — begin of a content block (text or tool_use)
+//   - ContentBlockDelta      — partial text or partial tool_use input JSON
+//   - ContentBlockStop       — end of a content block
+//   - MessageStop            — top-level stop_reason
+//   - Metadata               — usage + trace
+//
+// Each ContentBlock has an Index that ties Start/Delta/Stop together.
+func extractStreamResult(ctx context.Context, out *bedrockruntime.ConverseStreamOutput, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	_ = ctx
+	stream := out.GetStream()
+	defer stream.Close()
+
+	var (
+		finalText    strings.Builder
+		toolCalls    []bridle.ToolInvocation
+		sessionDelta []bridle.SessionEvent
+		usage        bridle.Usage
+		rawStop      string
+	)
+
+	type blockState struct {
+		kind      string // "text" | "tool_use"
+		toolID    string
+		toolName  string
+		toolInput strings.Builder
+		textBuf   strings.Builder
 	}
+	blocks := map[int32]*blockState{}
 
-	msgWrap, ok := resp.Output.(*types.ConverseOutputMemberMessage)
-	if !ok || msgWrap == nil {
-		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
-	}
-	msg := msgWrap.Value
-
-	var finalText string
-	var toolCalls []bridle.ToolInvocation
-	var sessionDelta []bridle.SessionEvent
-
-	for _, block := range msg.Content {
-		switch b := block.(type) {
-		case *types.ContentBlockMemberText:
-			sink.Emit(bridle.ModelChunk{Text: b.Value})
-			finalText += b.Value
-			sessionDelta = append(sessionDelta, bridle.SessionEvent{
-				Provider: bridle.ProviderBedrock,
-				Role:     bridle.RoleAssistant,
-				Content:  b.Value,
-			})
-
-		case *types.ContentBlockMemberToolUse:
-			argsJSON, jerr := documentToJSON(b.Value.Input)
-			if jerr != nil {
-				return bridle.ProviderResult{}, jerr
+	for event := range stream.Events() {
+		switch ev := event.(type) {
+		case *types.ConverseStreamOutputMemberContentBlockStart:
+			idx := aws.ToInt32(ev.Value.ContentBlockIndex)
+			bs := &blockState{}
+			if tu, ok := ev.Value.Start.(*types.ContentBlockStartMemberToolUse); ok {
+				bs.kind = "tool_use"
+				bs.toolID = aws.ToString(tu.Value.ToolUseId)
+				bs.toolName = aws.ToString(tu.Value.Name)
+				sink.Emit(bridle.ToolCallStart{ID: bs.toolID, Name: bs.toolName})
+			} else {
+				bs.kind = "text"
 			}
-			id := aws.ToString(b.Value.ToolUseId)
-			name := aws.ToString(b.Value.Name)
-			toolCalls = append(toolCalls, bridle.ToolInvocation{
-				ID:   id,
-				Name: name,
-				Args: argsJSON,
-			})
-			raw, _ := json.Marshal(map[string]any{
-				"toolUseId": id,
-				"name":      name,
-				"input":     json.RawMessage(argsJSON),
-			})
-			sessionDelta = append(sessionDelta, bridle.SessionEvent{
-				Provider: bridle.ProviderBedrock,
-				Role:     bridle.RoleAssistant,
-				RawJSON:  raw,
-			})
+			blocks[idx] = bs
+
+		case *types.ConverseStreamOutputMemberContentBlockDelta:
+			idx := aws.ToInt32(ev.Value.ContentBlockIndex)
+			bs, ok := blocks[idx]
+			if !ok {
+				bs = &blockState{kind: "text"}
+				blocks[idx] = bs
+			}
+			switch d := ev.Value.Delta.(type) {
+			case *types.ContentBlockDeltaMemberText:
+				sink.Emit(bridle.ModelChunk{Text: d.Value})
+				finalText.WriteString(d.Value)
+				bs.textBuf.WriteString(d.Value)
+			case *types.ContentBlockDeltaMemberToolUse:
+				bs.toolInput.WriteString(aws.ToString(d.Value.Input))
+			}
+
+		case *types.ConverseStreamOutputMemberContentBlockStop:
+			idx := aws.ToInt32(ev.Value.ContentBlockIndex)
+			bs, ok := blocks[idx]
+			if !ok {
+				continue
+			}
+			switch bs.kind {
+			case "text":
+				if bs.textBuf.Len() > 0 {
+					sessionDelta = append(sessionDelta, bridle.SessionEvent{
+						Provider: bridle.ProviderBedrock,
+						Role:     bridle.RoleAssistant,
+						Content:  bs.textBuf.String(),
+					})
+				}
+			case "tool_use":
+				args := json.RawMessage(bs.toolInput.String())
+				if len(args) == 0 {
+					args = json.RawMessage("{}")
+				}
+				toolCalls = append(toolCalls, bridle.ToolInvocation{
+					ID:   bs.toolID,
+					Name: bs.toolName,
+					Args: args,
+				})
+				raw, _ := json.Marshal(map[string]any{
+					"toolUseId": bs.toolID,
+					"name":      bs.toolName,
+					"input":     args,
+				})
+				sessionDelta = append(sessionDelta, bridle.SessionEvent{
+					Provider: bridle.ProviderBedrock,
+					Role:     bridle.RoleAssistant,
+					RawJSON:  raw,
+				})
+			}
+			delete(blocks, idx)
+
+		case *types.ConverseStreamOutputMemberMessageStop:
+			rawStop = string(ev.Value.StopReason)
+
+		case *types.ConverseStreamOutputMemberMetadata:
+			if ev.Value.Usage != nil {
+				usage.InputTokens = int(aws.ToInt32(ev.Value.Usage.InputTokens))
+				usage.OutputTokens = int(aws.ToInt32(ev.Value.Usage.OutputTokens))
+				if ev.Value.Usage.CacheReadInputTokens != nil {
+					usage.CacheReadInputTokens = int(aws.ToInt32(ev.Value.Usage.CacheReadInputTokens))
+				}
+				if ev.Value.Usage.CacheWriteInputTokens != nil {
+					usage.CacheCreationInputTokens = int(aws.ToInt32(ev.Value.Usage.CacheWriteInputTokens))
+				}
+			}
 		}
 	}
 
-	usage := bridle.Usage{}
-	if resp.Usage != nil {
-		usage.InputTokens = int(aws.ToInt32(resp.Usage.InputTokens))
-		usage.OutputTokens = int(aws.ToInt32(resp.Usage.OutputTokens))
-		if resp.Usage.CacheReadInputTokens != nil {
-			usage.CacheReadInputTokens = int(aws.ToInt32(resp.Usage.CacheReadInputTokens))
-		}
-		if resp.Usage.CacheWriteInputTokens != nil {
-			usage.CacheCreationInputTokens = int(aws.ToInt32(resp.Usage.CacheWriteInputTokens))
-		}
+	if err := stream.Err(); err != nil {
+		return bridle.ProviderResult{StopReason: bridle.StopReasonError},
+			fmt.Errorf("bedrock: stream: %w", err)
 	}
 
-	rawStop := string(resp.StopReason)
-	stopReason := bridle.StopReason(normalize.BedrockStopReason(rawStop))
-
-	// Safety stops: return empty ProviderResult{} alongside the error so the
-	// harness doesn't leak partial tool_use blocks or session events from a
-	// blocked turn. Matches the failure-mode contract of provider/claude and
-	// provider/openai — error paths return no usable result.
 	if rawStop == string(types.StopReasonGuardrailIntervened) {
 		return bridle.ProviderResult{StopReason: bridle.StopReasonError},
 			fmt.Errorf("bedrock: guardrail_intervened: response blocked by configured guardrail")
@@ -286,10 +348,10 @@ func extractResult(resp *bedrockruntime.ConverseOutput, sink bridle.EventSink) (
 	}
 
 	return bridle.ProviderResult{
-		FinalText:    finalText,
+		FinalText:    finalText.String(),
 		ToolCalls:    toolCalls,
 		Usage:        usage,
-		StopReason:   stopReason,
+		StopReason:   bridle.StopReason(normalize.BedrockStopReason(rawStop)),
 		SessionDelta: sessionDelta,
 	}, nil
 }
@@ -431,19 +493,3 @@ func toBedrockTools(defs []bridle.ToolDef, choice string, enableCache bool) (*ty
 	return cfg, nil
 }
 
-// documentToJSON marshals a smithy document.Interface back to JSON bytes.
-// Used for tool-call inputs which arrive as opaque documents on the wire.
-func documentToJSON(d document.Interface) (json.RawMessage, error) {
-	if d == nil {
-		return json.RawMessage("{}"), nil
-	}
-	var v any
-	if err := d.UnmarshalSmithyDocument(&v); err != nil {
-		return nil, fmt.Errorf("bedrock: tool input unmarshal: %w", err)
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("bedrock: tool input marshal: %w", err)
-	}
-	return b, nil
-}
