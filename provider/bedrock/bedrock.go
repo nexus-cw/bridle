@@ -155,7 +155,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, err
 	}
 
-	messages, err := toBedrockMessages(req.Messages)
+	messages, err := toBedrockMessages(req.Messages, p.EnablePromptCaching)
 	if err != nil {
 		return bridle.ProviderResult{}, err
 	}
@@ -243,59 +243,56 @@ func extractResult(resp *bedrockruntime.ConverseOutput, sink bridle.EventSink) (
 	rawStop := string(resp.StopReason)
 	stopReason := bridle.StopReason(normalize.BedrockStopReason(rawStop))
 
-	result := bridle.ProviderResult{
+	// Safety stops: return empty ProviderResult{} alongside the error so the
+	// harness doesn't leak partial tool_use blocks or session events from a
+	// blocked turn. Matches the failure-mode contract of provider/claude and
+	// provider/openai — error paths return no usable result.
+	if rawStop == string(types.StopReasonGuardrailIntervened) {
+		return bridle.ProviderResult{StopReason: bridle.StopReasonError},
+			fmt.Errorf("bedrock: guardrail_intervened: response blocked by configured guardrail")
+	}
+	if rawStop == string(types.StopReasonContentFiltered) {
+		return bridle.ProviderResult{StopReason: bridle.StopReasonError},
+			fmt.Errorf("bedrock: content_filtered: response blocked by content filter")
+	}
+
+	return bridle.ProviderResult{
 		FinalText:    finalText,
 		ToolCalls:    toolCalls,
 		Usage:        usage,
 		StopReason:   stopReason,
 		SessionDelta: sessionDelta,
-	}
-
-	// Safety stops surface as a non-nil error so harness callers can
-	// distinguish a model that completed normally from one that was blocked.
-	// StopReason stays as StopReasonError to match.
-	if rawStop == string(types.StopReasonGuardrailIntervened) {
-		return result, fmt.Errorf("bedrock: guardrail_intervened: response blocked by configured guardrail")
-	}
-	if rawStop == string(types.StopReasonContentFiltered) {
-		return result, fmt.Errorf("bedrock: content_filtered: response blocked by content filter")
-	}
-
-	return result, nil
+	}, nil
 }
 
 // toBedrockMessages flattens bridle ProviderMessages into Bedrock Converse
-// messages. Consecutive tool_result entries are grouped into a single
-// user-role message containing multiple ToolResultBlocks — Bedrock rejects
-// requests that send each tool_result as its own user turn (consecutive
-// same-role messages are invalid in the Converse contract).
+// messages. Bedrock requires strict user/assistant alternation, where
+// tool_result is a user content block. We accumulate user-role blocks
+// (text + tool_result) into pendingUserBlocks and flush them as a single
+// user message only when we hit an assistant turn or end of stream.
 //
-// Pre-existing harness limitation: prior assistant turns that contained
-// tool_use blocks are surfaced here as Role=assistant + Content=text only
-// (ProviderMessage doesn't carry RawJSON). Multi-turn tool conversations
-// where the model has to see its own past tool_use calls reconstructed will
-// fail at the Bedrock validation layer until ProviderMessage gains a
-// structured tool-call-history field — that's a bridle harness change, not
-// a provider-local fix.
-func toBedrockMessages(msgs []bridle.ProviderMessage) ([]types.Message, error) {
+// Assistant turns are emitted with both text content and reconstructed
+// tool_use blocks (from ProviderMessage.ToolCalls, populated by the
+// harness in run.go's tool loop).
+func toBedrockMessages(msgs []bridle.ProviderMessage, enableCache bool) ([]types.Message, error) {
 	out := make([]types.Message, 0, len(msgs))
-	var pendingToolResults []types.ContentBlock
+	var pendingUserBlocks []types.ContentBlock
 
-	flushToolResults := func() {
-		if len(pendingToolResults) == 0 {
+	flushUser := func() {
+		if len(pendingUserBlocks) == 0 {
 			return
 		}
 		out = append(out, types.Message{
 			Role:    types.ConversationRoleUser,
-			Content: pendingToolResults,
+			Content: pendingUserBlocks,
 		})
-		pendingToolResults = nil
+		pendingUserBlocks = nil
 	}
 
 	for _, m := range msgs {
 		switch m.Role {
 		case "tool_result":
-			pendingToolResults = append(pendingToolResults, &types.ContentBlockMemberToolResult{
+			pendingUserBlocks = append(pendingUserBlocks, &types.ContentBlockMemberToolResult{
 				Value: types.ToolResultBlock{
 					ToolUseId: aws.String(m.ToolCallID),
 					Content: []types.ToolResultContentBlock{
@@ -305,28 +302,56 @@ func toBedrockMessages(msgs []bridle.ProviderMessage) ([]types.Message, error) {
 			})
 
 		case "user", "system":
-			flushToolResults()
-			// Converse takes system separately via the System field; if a
-			// ProviderMessage sneaks in with role=system, fold it into a user
-			// turn rather than dropping it.
-			out = append(out, types.Message{
-				Role:    types.ConversationRoleUser,
-				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: m.Content}},
-			})
+			// Both fold into a user content block. System is taken separately
+			// via ConverseInput.System; any system in the message stream is
+			// an inline context note from the harness.
+			if m.Content != "" {
+				pendingUserBlocks = append(pendingUserBlocks, &types.ContentBlockMemberText{Value: m.Content})
+			}
 
 		case "assistant":
-			flushToolResults()
+			flushUser()
+			blocks := []types.ContentBlock{}
+			if m.Content != "" {
+				blocks = append(blocks, &types.ContentBlockMemberText{Value: m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				var input any
+				if len(tc.Args) > 0 {
+					if err := json.Unmarshal(tc.Args, &input); err != nil {
+						return nil, fmt.Errorf("bedrock: tool_use %q args unmarshal: %w", tc.Name, err)
+					}
+				}
+				blocks = append(blocks, &types.ContentBlockMemberToolUse{
+					Value: types.ToolUseBlock{
+						ToolUseId: aws.String(tc.ID),
+						Name:      aws.String(tc.Name),
+						Input:     document.NewLazyDocument(input),
+					},
+				})
+			}
+			if len(blocks) == 0 {
+				continue // skip empty assistant turn rather than send invalid request
+			}
 			out = append(out, types.Message{
 				Role:    types.ConversationRoleAssistant,
-				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: m.Content}},
+				Content: blocks,
 			})
 
 		default:
-			// Unknown role — skip rather than emit garbage.
 			continue
 		}
 	}
-	flushToolResults()
+	flushUser()
+
+	if enableCache && len(out) > 0 {
+		last := &out[len(out)-1]
+		if last.Role == types.ConversationRoleUser {
+			last.Content = append(last.Content, &types.ContentBlockMemberCachePoint{
+				Value: types.CachePointBlock{Type: types.CachePointTypeDefault},
+			})
+		}
+	}
 	return out, nil
 }
 
