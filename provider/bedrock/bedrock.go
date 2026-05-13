@@ -164,6 +164,24 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		ModelId:  aws.String(req.Model),
 		Messages: messages,
 	}
+
+	maxTokens := p.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = 4096
+	}
+	in.InferenceConfig = &types.InferenceConfiguration{
+		MaxTokens: aws.Int32(maxTokens),
+	}
+	if p.Temperature != nil {
+		in.InferenceConfig.Temperature = p.Temperature
+	}
+	if p.TopP != nil {
+		in.InferenceConfig.TopP = p.TopP
+	}
+	if len(p.StopSequences) > 0 {
+		in.InferenceConfig.StopSequences = p.StopSequences
+	}
+
 	if req.AppendSystemPrompt != "" {
 		in.System = []types.SystemContentBlock{
 			&types.SystemContentBlockMemberText{Value: req.AppendSystemPrompt},
