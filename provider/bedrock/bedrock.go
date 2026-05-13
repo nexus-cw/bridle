@@ -193,7 +193,15 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 			})
 		}
 	}
-	if toolCfg, err := toBedrockTools(req.Tools, req.ToolChoice, p.EnablePromptCaching); err != nil {
+	// ToolChoice "none" means "no tools may be called this turn" per
+	// the TurnRequest contract. Bedrock Converse has no native "none"
+	// value, so honour the contract by dropping the tool list entirely
+	// rather than sending tools+auto (which the model can still call).
+	tools := req.Tools
+	if req.ToolChoice == "none" {
+		tools = nil
+	}
+	if toolCfg, err := toBedrockTools(tools, req.ToolChoice, p.EnablePromptCaching); err != nil {
 		return bridle.ProviderResult{}, err
 	} else if toolCfg != nil {
 		in.ToolConfig = toolCfg

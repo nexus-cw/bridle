@@ -167,6 +167,26 @@ func TestToBedrockTools_CachePointAppended(t *testing.T) {
 	}
 }
 
+func TestProvider_ToolChoiceNone_DropsTools(t *testing.T) {
+	// "none" contract: model must not call tools this turn. Bedrock has no
+	// native "none", so RunTurn must drop req.Tools entirely instead of
+	// sending tools + auto (which would let the model call them anyway).
+	fc := &fakeClient{err: errors.New("stop after capture")}
+	p := NewWithClient(fc)
+	_, _ = p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:      "anthropic.claude-3-haiku-20240307-v1:0",
+		ToolChoice: "none",
+		Tools:      []bridle.ToolDef{{Name: "f", Description: "f"}},
+		Messages:   []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+	}, &recordingSink{})
+	if fc.lastStreamInput == nil {
+		t.Fatal("fake client did not capture ConverseStream input")
+	}
+	if fc.lastStreamInput.ToolConfig != nil {
+		t.Errorf("ToolChoice=none should drop ToolConfig, got %+v", fc.lastStreamInput.ToolConfig)
+	}
+}
+
 func TestProvider_StreamError(t *testing.T) {
 	p := NewWithClient(&fakeClient{err: errors.New("network down")})
 	sink := &recordingSink{}
