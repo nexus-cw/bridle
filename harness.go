@@ -131,6 +131,22 @@ type TurnRequest struct {
 	// into the other. Direct-API providers (claude-api, ollama, openai)
 	// ignore this field — they have no subprocess to anchor.
 	Cwd string
+
+	// ProviderEnv is per-call environment for the provider. Direct-API
+	// providers read it as their auth/routing config (commonly
+	// ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, OPENAI_API_KEY,
+	// OPENAI_BASE_URL); subprocess providers (claude-code) propagate it
+	// into the spawned process's env so the same per-turn override
+	// pattern applies. nil/empty = use whatever the provider already
+	// has on its own (process env, --bare-style flags, etc).
+	//
+	// Per-call rather than per-process so a single funnel can mix
+	// credentials across turns — e.g. main turn against the operator's
+	// Anthropic credit pool, judge turn against a DeepSeek-via-
+	// Anthropic-shape credential, eval turn against OpenAI. The
+	// credential store wires this from aspects.default_*_credential
+	// per task #218.
+	ProviderEnv map[string]string
 }
 
 // TurnResult is the structured outcome of a completed turn.

@@ -51,6 +51,12 @@ type ProviderRequest struct {
 	// TurnRequest.Cwd). Empty falls through to bridle's host cwd. Direct-
 	// API providers ignore this field.
 	Cwd string
+
+	// ProviderEnv is per-turn auth/routing env (see TurnRequest.ProviderEnv).
+	// Subprocess providers overlay it onto the spawned process's env;
+	// direct-API providers read it as auth/base-url config. Empty/nil =
+	// provider uses its own default config.
+	ProviderEnv map[string]string
 }
 
 // ProviderMessage is a single exchange entry in provider-agnostic form.

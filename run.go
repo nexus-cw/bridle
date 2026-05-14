@@ -279,16 +279,17 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 	}
 
 	return ProviderRequest{
-		AspectID:     req.AspectID,
+		AspectID:           req.AspectID,
 		AppendSystemPrompt: req.AppendSystemPrompt,
-		Session:      req.Session,
-		Messages:     messages,
-		Tools:        req.Tools,
-		ToolChoice:   req.ToolChoice,
-		MCP:          req.MCP,
-		MaxSteps:     req.MaxSteps,
-		Model:        req.Model,
-		Cwd:          req.Cwd,
+		Session:            req.Session,
+		Messages:           messages,
+		Tools:              req.Tools,
+		ToolChoice:         req.ToolChoice,
+		MCP:                req.MCP,
+		MaxSteps:           req.MaxSteps,
+		Model:              req.Model,
+		Cwd:                req.Cwd,
+		ProviderEnv:        req.ProviderEnv,
 	}
 }
 

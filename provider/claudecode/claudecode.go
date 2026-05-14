@@ -212,6 +212,16 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
+	// Per-turn env overlay (task #218). req.ProviderEnv carries the
+	// auth/routing keys the funnel selected for THIS turn — typically
+	// ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL when running judge / cheap-
+	// model paths against a non-subscription credential. Layered over
+	// the parent process env so anything not explicitly overridden
+	// (PATH, HOME, etc.) keeps working. Empty/nil = no overlay; the
+	// subprocess inherits the bridle host's env unchanged.
+	if len(req.ProviderEnv) > 0 {
+		cmd.Env = mergeEnv(os.Environ(), req.ProviderEnv)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -519,4 +529,39 @@ func buildPrompt(req bridle.ProviderRequest) string {
 		}
 	}
 	return ""
+}
+
+// mergeEnv overlays the per-turn key=value map onto the parent
+// process's env. Per-turn keys take precedence; any KEY=VALUE pair in
+// `base` whose KEY is in `overlay` is replaced. Both inputs are left
+// unmodified.
+func mergeEnv(base []string, overlay map[string]string) []string {
+	if len(overlay) == 0 {
+		return base
+	}
+	// Index base by KEY for O(1) replacement.
+	idx := make(map[string]int, len(base))
+	out := make([]string, len(base))
+	copy(out, base)
+	for i, kv := range out {
+		eq := -1
+		for j := 0; j < len(kv); j++ {
+			if kv[j] == '=' {
+				eq = j
+				break
+			}
+		}
+		if eq > 0 {
+			idx[kv[:eq]] = i
+		}
+	}
+	for k, v := range overlay {
+		entry := k + "=" + v
+		if i, ok := idx[k]; ok {
+			out[i] = entry
+		} else {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
