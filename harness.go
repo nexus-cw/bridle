@@ -89,6 +89,15 @@ type InboxItem struct {
 	// claude-code jsonl, preventing SessionTail bleed across threads.
 	// Zero = legacy/non-chat synthetic item or pre-#226 row.
 	ThreadRoot int64
+
+	// Source identifies which trigger channel produced this item.
+	// Empty defaults to "chat" (legacy / nexus-chat substrate).
+	// agora-side callers set Source="tty" for operator-typed inputs,
+	// allowing ReturnHandlers to branch routing (chat → bus reply,
+	// tty → panel-only). Future trigger channels add new Source
+	// values; consumers default-treat unknown values as "chat" for
+	// backward compat.
+	Source string
 }
 
 // TurnRequest is the complete input for one deliberation turn.
