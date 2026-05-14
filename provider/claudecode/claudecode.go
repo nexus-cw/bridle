@@ -383,6 +383,26 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 							Content:  block.Text,
 						})
 					case "tool_use":
+						// Reset finalText: any assistant text emitted
+						// BEFORE this tool call was pre-tool exploratory
+						// thinking, not the model's settled answer. Only
+						// text emitted AFTER the LAST tool call is the
+						// answer downstream consumers should see.
+						//
+						// Operator's call (chat #951, 2026-05-14):
+						// "drop — chat doesn't need the tool output if we
+						// actually get the assistant text." The pre-fix
+						// path was concatenating pre-tool reasoning text
+						// + post-tool answer into a single auto-posted
+						// chat row, producing harrow's #944 double (draft
+						// + rewrite of the same answer pasted together).
+						//
+						// The streamed-paragraphs path (multiple text
+						// blocks in a row with NO tool_use between them)
+						// is unaffected: those still concat naturally
+						// because nothing resets between them. The
+						// partial-content test pins that behavior.
+						finalText = ""
 						tc := bridle.ToolCallStart{ID: block.ID, Name: block.Name, Args: block.Input}
 						sink.Emit(tc)
 						pendingCalls[block.ID] = tc
