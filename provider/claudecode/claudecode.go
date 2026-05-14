@@ -50,6 +50,16 @@ type Provider struct {
 	ClaudePath string
 	// AllowedTools restricts which claude-native tools the CLI may use.
 	AllowedTools []string
+	// DisallowedTools blocks specific claude-native tools regardless of
+	// the (default or explicit) allowlist. Passed verbatim as
+	// --disallowed-tools <comma-list>. Useful for blocking tools that
+	// don't make sense for funnel-driven aspects (the CLI's full default
+	// allowlist exposes things like Agent/SendMessage/TaskCreate/Cron*
+	// that are session-orchestration primitives — they spawn children
+	// that orphan when the per-turn `claude -p` subprocess exits, or
+	// they create a parallel response channel that bypasses the funnel's
+	// chat auto-post). Empty = no --disallowed-tools flag passed.
+	DisallowedTools []string
 	// ExtraArgs are appended verbatim to the claude invocation.
 	ExtraArgs []string
 	// Bare, when true, passes --bare to the CLI. Bare mode skips hooks,
@@ -178,6 +188,10 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	}
 	if len(allowed) > 0 {
 		args = append(args, "--allowedTools", strings.Join(allowed, ","))
+	}
+
+	if len(p.DisallowedTools) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(p.DisallowedTools, ","))
 	}
 
 	if req.Model != "" {
