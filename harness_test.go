@@ -505,3 +505,43 @@ func (p *panicProvider) Capabilities() bridle.ProviderCapabilities {
 func (p *panicProvider) RunTurn(_ context.Context, _ bridle.ProviderRequest, _ bridle.EventSink) (bridle.ProviderResult, error) {
 	panic("deliberate test panic")
 }
+
+// TestRunTurn_TextAccumulatesAcrossSteps pins the fix where text content
+// from successive provider turns is concatenated rather than overwritten.
+// The historic bug discarded earlier text blocks when a turn included a
+// tool call followed by more text — observed 2026-05-14 with keel
+// producing a 1306-token cairn spec review whose substantive 6-point
+// analysis was silently dropped because only the closing coda survived.
+func TestRunTurn_TextAccumulatesAcrossSteps(t *testing.T) {
+	// Step 1: model emits substantive text + a tool call.
+	step1 := fake.Step{
+		Text:      "Initial substantive analysis with multiple points.",
+		ToolCalls: []bridle.ToolInvocation{inv("1", "echo")},
+	}
+	// Step 2: post-tool, model emits a short closing line only.
+	step2 := fake.Step{Text: "Done."}
+
+	p := fake.NewProvider(step1, step2)
+	runner := fake.NewToolRunner(map[string][]fake.ToolResult{
+		"echo": {{Result: rawJSON(`"ok"`)}},
+	})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Model:    "fake-model",
+		Tools:    []bridle.ToolDef{toolDef("echo")},
+		MaxSteps: 5,
+	}, runner, sink)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Both text blocks should be present, separated by blank line.
+	want := "Initial substantive analysis with multiple points.\n\nDone."
+	if result.FinalText != want {
+		t.Errorf("FinalText accumulation failed:\n  got:  %q\n  want: %q",
+			result.FinalText, want)
+	}
+}

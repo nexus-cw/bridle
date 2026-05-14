@@ -73,7 +73,21 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			}, err
 		}
 
-		finalText = presult.FinalText
+		// Concatenate text across provider turns rather than overwriting.
+		// Multi-step turns (text → tool → text → tool → final text) need
+		// every text block preserved or downstream consumers (e.g. nexus
+		// funnel auto-post) see only the last fragment. Surfaced
+		// 2026-05-14: keel's 6-point cairn spec review (1306 output
+		// tokens across multiple text blocks) reached chat as only its
+		// 232-char closing coda — the substantive analysis was discarded
+		// by the overwrite. Blank-line separator preserves block
+		// boundaries readers expect.
+		if presult.FinalText != "" {
+			if finalText != "" {
+				finalText += "\n\n"
+			}
+			finalText += presult.FinalText
+		}
 		totalUsage = addUsage(totalUsage, presult.Usage)
 		sessionDelta = append(sessionDelta, presult.SessionDelta...)
 
