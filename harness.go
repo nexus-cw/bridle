@@ -14,6 +14,7 @@ type ProviderID string
 
 const (
 	ProviderClaude    ProviderID = "claude-api"
+	ProviderClaudePty ProviderID = "claude-pty"
 	ProviderOllama    ProviderID = "ollama-local"
 	ProviderOpenAI    ProviderID = "openai-api"
 	ProviderBedrock   ProviderID = "bedrock"
