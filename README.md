@@ -1,5 +1,10 @@
 # bridle
 
+[![CI](https://github.com/CarriedWorldUniverse/bridle/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CarriedWorldUniverse/bridle/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/CarriedWorldUniverse/bridle?include_prereleases&sort=semver&display_name=tag)](https://github.com/CarriedWorldUniverse/bridle/releases)
+[![Go Reference](https://pkg.go.dev/badge/github.com/CarriedWorldUniverse/bridle.svg)](https://pkg.go.dev/github.com/CarriedWorldUniverse/bridle)
+[![License](https://img.shields.io/github/license/CarriedWorldUniverse/bridle)](LICENSE)
+
 The harness layer of the Nexus funnel/harness split. A small Go library that drives one deliberation turn of one model with one tool surface, emitting a stream of observable events and returning a structured `TurnResult`.
 
 The funnel imports bridle. Aspects do not import bridle directly.

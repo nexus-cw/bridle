@@ -25,6 +25,7 @@ import (
 	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/version"
 	claudeapi "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	"github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	"github.com/CarriedWorldUniverse/bridle/provider/ollama"
@@ -37,7 +38,13 @@ func main() {
 	maxStepsFlag := flag.Int("max-steps", 5, "max tool-call rounds per turn")
 	maxTurnsFlag := flag.Int("max-turns", 3, "max deliberation turns before giving up")
 	sessionFileFlag := flag.String("session", "", "path to session JSONL file (default: temp file)")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("stubfunnel %s\n", version.Version)
+		return
+	}
 
 	ctx := context.Background()
 
