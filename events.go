@@ -1,6 +1,9 @@
 package bridle
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // Event is the union type for all observable harness events.
 type Event interface {
@@ -42,6 +45,42 @@ type TurnDone struct {
 type TurnError struct {
 	Err   error
 	Stage string // "provider", "tool", "harness-recover", etc.
+}
+
+// ProviderErrorKind classifies a provider-level error so callers can
+// surface a distinct diagnosis string instead of an opaque exit code.
+type ProviderErrorKind string
+
+const (
+	ProviderErrorAuthFailed  ProviderErrorKind = "auth_failed"
+	ProviderErrorRateLimit   ProviderErrorKind = "rate_limit"
+	ProviderErrorServerError ProviderErrorKind = "server_error"
+)
+
+// ProviderError is a classified provider-level error.
+type ProviderError struct {
+	Kind    ProviderErrorKind
+	Message string
+	Err     error // underlying error (may be nil)
+}
+
+func (e *ProviderError) Error() string {
+	if e.Err != nil {
+		return e.Message + ": " + e.Err.Error()
+	}
+	return e.Message
+}
+
+func (e *ProviderError) Unwrap() error { return e.Err }
+
+// IsProviderErrorKind reports whether err (or any error in its chain) is
+// a ProviderError with the given kind.
+func IsProviderErrorKind(err error, kind ProviderErrorKind) bool {
+	var pe *ProviderError
+	if errors.As(err, &pe) {
+		return pe.Kind == kind
+	}
+	return false
 }
 
 func (ModelChunk) event()    {}
