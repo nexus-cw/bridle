@@ -290,6 +290,15 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 		if ctx.Err() != nil {
 			result.StopReason = bridle.StopReasonAborted
 		} else if result.FinalText != "" || len(result.ToolCalls) > 0 || len(result.SessionDelta) > 0 {
+			pe := classifyProviderError(stderr.String(), waitErr)
+			if pe.Kind == bridle.ProviderErrorAuthFailed || pe.Kind == bridle.ProviderErrorRateLimit || pe.Kind == bridle.ProviderErrorServerError {
+				// API-level error — the "content" is a synthetic
+				// response from the CLI (e.g. "Not logged in"), not
+				// a model answer. Discard it so the funnel doesn't
+				// auto-post an auth-failure message as model output.
+				sink.Emit(bridle.TurnError{Err: pe, Stage: string(pe.Kind)})
+				return bridle.ProviderResult{}, pe
+			}
 			// Subprocess exited non-zero AFTER producing parseable
 			// content — common cause: output-token cap hit, CLI surfaces
 			// it as exit 1 rather than a clean stop. Preserve the partial
@@ -302,8 +311,9 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 				Stage: "subprocess_exit_partial",
 			})
 		} else {
-			sink.Emit(bridle.TurnError{Err: fmt.Errorf("claudecode: %w", waitErr), Stage: "subprocess_exit"})
-			return bridle.ProviderResult{}, fmt.Errorf("claudecode: CLI error: %w (stderr: %s)", waitErr, stderr.String())
+			pe := classifyProviderError(stderr.String(), waitErr)
+			sink.Emit(bridle.TurnError{Err: pe, Stage: string(pe.Kind)})
+			return bridle.ProviderResult{}, pe
 		}
 	}
 
@@ -345,6 +355,18 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 
 		var eventType string
 		json.Unmarshal(event["type"], &eventType) //nolint:errcheck
+
+		// API error detection: claude-code emits events with
+		// is_api_error=true and error=<classification> when the
+		// provider API returns an error (auth, rate limit, etc.).
+		// Capture these so callers can surface a distinct diagnosis
+		// even when the stream contains partial content before exit.
+		if isAPIError(event) {
+			sink.Emit(bridle.TurnError{
+				Err:   fmt.Errorf("claudecode: provider API error: %s", string(event["error"])),
+				Stage: "provider_api_error",
+			})
+		}
 
 		switch eventType {
 		case "assistant":
@@ -598,4 +620,73 @@ func mergeEnv(base []string, overlay map[string]string) []string {
 		}
 	}
 	return out
+}
+
+// isAPIError reports whether an event carries a CLI-level API error marker.
+// claude-code sets is_api_error=true (snake_case) or isApiErrorMessage=true
+// (camelCase) when the model API returns an error.
+func isAPIError(event map[string]json.RawMessage) bool {
+	for _, key := range []string{"is_api_error", "isApiErrorMessage"} {
+		if raw, ok := event[key]; ok {
+			var v bool
+			if json.Unmarshal(raw, &v) == nil && v {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// classifyProviderError inspects the CLI's stderr and classifies the
+// subprocess error into a bridle.ProviderError so the activity log
+// surfaces a distinct diagnosis string instead of an opaque exit code.
+//
+// Patterns matched (case-insensitive substring):
+//   - "not logged in", "authentication_failed", "run /login" → auth_failed
+//   - "rate_limit", "rate limited" → rate_limit
+//   - "server_error", "internal server error", "overloaded" → server_error
+//
+// Falls back to a generic subprocess-error ProviderError wrapping the
+// waitErr so callers still get a classified error rather than a raw
+// fmt.Errorf.
+func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
+	lower := strings.ToLower(stderr)
+
+	// Auth failures — the dominant case. claude-code writes the synthetic
+	// "Not logged in. Please run /login." response to stderr + exits 1
+	// when ANTHROPIC_API_KEY is missing/unset/expired.
+	if strings.Contains(lower, "not logged in") ||
+		strings.Contains(lower, "authentication_failed") ||
+		strings.Contains(lower, "run /login") {
+		return &bridle.ProviderError{
+			Kind:    bridle.ProviderErrorAuthFailed,
+			Message: "claude-code: authentication failed — aspect not authenticated to provider. Check ANTHROPIC_API_KEY or run /login",
+			Err:     waitErr,
+		}
+	}
+
+	if strings.Contains(lower, "rate_limit") ||
+		strings.Contains(lower, "rate limited") {
+		return &bridle.ProviderError{
+			Kind:    bridle.ProviderErrorRateLimit,
+			Message: "claude-code: rate limited — provider throttled the request",
+			Err:     waitErr,
+		}
+	}
+
+	if strings.Contains(lower, "server_error") ||
+		strings.Contains(lower, "internal server error") ||
+		strings.Contains(lower, "overloaded") {
+		return &bridle.ProviderError{
+			Kind:    bridle.ProviderErrorServerError,
+			Message: "claude-code: provider server error — the API returned an internal error",
+			Err:     waitErr,
+		}
+	}
+
+	return &bridle.ProviderError{
+		Kind:    "subprocess_exit",
+		Message: "claude-code: subprocess exited with error",
+		Err:     waitErr,
+	}
 }
