@@ -126,93 +126,15 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 		claudePath = "claude"
 	}
 
-	prompt := buildPrompt(req)
-
-	// --permission-mode bypassPermissions: aspects in nexus run with
-	// full filesystem trust by design — the operator's threat model is
-	// "the aspect is me, just running headless." Without this flag,
-	// claude-code's default sandbox limits file ops to the launch cwd,
-	// which is the nexus process dir and useless for repo work. The
-	// operator-trusted-aspect model has been the rule since agent-
-	// network; bridle.claudecode honors it for parity. Aspects that
-	// need restriction should run a different provider or wrap with
-	// OS-level sandboxing — bridle defers to the runtime, not provider.
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
-
-	// systemPromptFile is set (non-empty) when we spill the system
-	// prompt to disk so we can delete it after the CLI exits. Kept in
-	// scope so cleanup runs whether the call returns via the happy
-	// path, parse error, or context cancellation.
-	var systemPromptFile string
+	args, systemPromptFile, perr := p.buildCLIArgs(req, sessionIsNew)
+	if perr != nil {
+		return bridle.ProviderResult{}, perr
+	}
 	defer func() {
 		if systemPromptFile != "" {
 			_ = os.Remove(systemPromptFile)
 		}
 	}()
-
-	if req.AppendSystemPrompt != "" {
-		spillArgs, file, perr := appendSystemPromptArgs(req.AppendSystemPrompt)
-		if perr != nil {
-			return bridle.ProviderResult{}, perr
-		}
-		systemPromptFile = file
-		args = append(args, spillArgs...)
-	}
-
-	if p.Bare {
-		args = append(args, "--bare")
-	}
-
-	// Allowed tools: per-turn list from the funnel (req.Tools.Name) takes
-	// precedence; fall back to the provider-level default. The CLI owns
-	// execution, so the funnel sets the *allowlist*, not the schemas.
-	//
-	// Guard: a non-empty req.Tools with all-empty Name fields would
-	// otherwise translate to allowed=[] and silently drop the
-	// --allowedTools flag, letting the CLI run with the full default
-	// allowlist. That's a footgun (silent privilege escalation), so on
-	// degenerate input we fall back to p.AllowedTools rather than the
-	// "no flag at all" path.
-	allowed := p.AllowedTools
-	if len(req.Tools) > 0 {
-		perTurn := make([]string, 0, len(req.Tools))
-		for _, t := range req.Tools {
-			if t.Name != "" {
-				perTurn = append(perTurn, t.Name)
-			}
-		}
-		if len(perTurn) > 0 {
-			allowed = perTurn
-		}
-		// else: req.Tools had nothing usable; fall through to p.AllowedTools.
-	}
-	if len(allowed) > 0 {
-		args = append(args, "--allowedTools", strings.Join(allowed, ","))
-	}
-
-	if len(p.DisallowedTools) > 0 {
-		args = append(args, "--disallowedTools", strings.Join(p.DisallowedTools, ","))
-	}
-
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
-
-	// Session continuity: --session-id creates a fresh CLI session jsonl
-	// with this id; --resume loads an existing one. The funnel signals
-	// which via Session.New so the provider doesn't have to probe disk.
-	// claude-code errors loudly on --resume for a non-existent id, so
-	// getting this wrong on the first turn is the difference between a
-	// working aspect and a permanent NoConversationFound on every turn.
-	if req.Session.ID != "" {
-		if sessionIsNew {
-			args = append(args, "--session-id", req.Session.ID)
-		} else {
-			args = append(args, "--resume", req.Session.ID)
-		}
-	}
-
-	args = append(args, p.ExtraArgs...)
 
 	// Don't use exec.CommandContext — that SIGKILLs immediately on cancel.
 	// We want SIGTERM first, then SIGKILL after a grace period.
@@ -526,6 +448,71 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 		StopReason:   stopReason,
 		SessionDelta: sessionDelta,
 	}, nil
+}
+
+// buildCLIArgs constructs the claude CLI argument vector for one turn.
+// Extracted from runTurnOnce so the allowed-tools / MCP interaction is
+// testable without spawning a subprocess.
+func (p *Provider) buildCLIArgs(req bridle.ProviderRequest, sessionIsNew bool) (args []string, systemPromptFile string, err error) {
+	prompt := buildPrompt(req)
+	args = []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
+
+	if req.AppendSystemPrompt != "" {
+		spillArgs, file, perr := appendSystemPromptArgs(req.AppendSystemPrompt)
+		if perr != nil {
+			return nil, "", perr
+		}
+		systemPromptFile = file
+		args = append(args, spillArgs...)
+	}
+
+	if p.Bare {
+		args = append(args, "--bare")
+	}
+
+	// Allowed tools: when MCP is configured on this turn, the subprocess
+	// discovers its own tools from .mcp.json (via cmd.Dir). req.Tools
+	// are bridle-side tool defs — passing them as --allowedTools would
+	// silently block every MCP-discovered tool whose name isn't in the
+	// list. Per-aspect MCP scoping is handled by cmd.Dir, not by
+	// --allowedTools. When MCP is NOT configured, req.Tools (or the
+	// provider-level default) drives --allowedTools as before.
+	if req.MCP == nil {
+		allowed := p.AllowedTools
+		if len(req.Tools) > 0 {
+			perTurn := make([]string, 0, len(req.Tools))
+			for _, t := range req.Tools {
+				if t.Name != "" {
+					perTurn = append(perTurn, t.Name)
+				}
+			}
+			if len(perTurn) > 0 {
+				allowed = perTurn
+			}
+		}
+		if len(allowed) > 0 {
+			args = append(args, "--allowedTools", strings.Join(allowed, ","))
+		}
+	}
+
+	if len(p.DisallowedTools) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(p.DisallowedTools, ","))
+	}
+
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+
+	if req.Session.ID != "" {
+		if sessionIsNew {
+			args = append(args, "--session-id", req.Session.ID)
+		} else {
+			args = append(args, "--resume", req.Session.ID)
+		}
+	}
+
+	args = append(args, p.ExtraArgs...)
+	return args, systemPromptFile, nil
 }
 
 // appendSystemPromptArgs returns the CLI args for the caller's
