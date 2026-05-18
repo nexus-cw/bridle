@@ -52,9 +52,12 @@ type TurnError struct {
 type ProviderErrorKind string
 
 const (
-	ProviderErrorAuthFailed  ProviderErrorKind = "auth_failed"
-	ProviderErrorRateLimit   ProviderErrorKind = "rate_limit"
-	ProviderErrorServerError ProviderErrorKind = "server_error"
+	ProviderErrorAuthFailed   ProviderErrorKind = "auth_failed"
+	ProviderErrorRateLimit    ProviderErrorKind = "rate_limit"
+	ProviderErrorServerError  ProviderErrorKind = "server_error"
+	ProviderErrorNetworkError ProviderErrorKind = "network_error"
+	ProviderErrorTimeout      ProviderErrorKind = "timeout"
+	ProviderErrorTLSError     ProviderErrorKind = "tls_error"
 )
 
 // ProviderError is a classified provider-level error.
@@ -83,9 +86,9 @@ func IsProviderErrorKind(err error, kind ProviderErrorKind) bool {
 	return false
 }
 
-func (ModelChunk) event()    {}
-func (ToolCallStart) event() {}
+func (ModelChunk) event()     {}
+func (ToolCallStart) event()  {}
 func (ToolCallResult) event() {}
-func (StepBoundary) event()  {}
-func (TurnDone) event()      {}
-func (TurnError) event()     {}
+func (StepBoundary) event()   {}
+func (TurnDone) event()       {}
+func (TurnError) event()      {}
