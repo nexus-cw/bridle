@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -69,6 +70,14 @@ type Provider struct {
 	// surface and don't need user-level state. Context must be supplied
 	// explicitly via --append-system-prompt[-file] / --add-dir / etc.
 	Bare bool
+	// MaxRetries is the maximum number of retry attempts for transient
+	// errors (rate_limit, server_error, network_error, timeout). 0 = no
+	// retry — transient errors propagate immediately. Session-id-in-use
+	// retries are independent of this limit. Default: 0.
+	MaxRetries int
+	// RetryDelay is the initial delay between retries (doubles each
+	// attempt). Default: 2s when MaxRetries > 0.
+	RetryDelay time.Duration
 }
 
 // New returns a claudecode Provider with default settings.
@@ -98,16 +107,64 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 // the case where a prior turn started, wrote the jsonl, and errored
 // before the funnel could flip Session.New=false. Without the fallback
 // the session was permanently bricked.
+//
+// Retry: when MaxRetries > 0, transient errors (rate_limit, server_error,
+// network_error, timeout) are retried with exponential backoff.
+// Auth failures and unknown subprocess errors propagate immediately.
+// Session-id-in-use retries are independent of MaxRetries.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
-	result, err := p.runTurnOnce(ctx, req, sink, req.Session.New)
-	if err != nil && req.Session.ID != "" && req.Session.New && isSessionIDInUseErr(err) {
-		// First attempt was --session-id and the id is already taken
-		// (probably from a prior failed turn that wrote the jsonl).
-		// Retry once with --resume — the on-disk session is the right
-		// continuation point.
-		return p.runTurnOnce(ctx, req, sink, false)
+	maxRetries := p.MaxRetries
+	retryDelay := p.RetryDelay
+	if retryDelay == 0 && maxRetries > 0 {
+		retryDelay = 2 * time.Second
 	}
-	return result, err
+
+	for attempt := 0; ; attempt++ {
+		if ctx.Err() != nil {
+			return bridle.ProviderResult{}, ctx.Err()
+		}
+
+		sessionIsNew := req.Session.New
+		result, err := p.runTurnOnce(ctx, req, sink, sessionIsNew)
+
+		if err == nil {
+			return result, nil
+		}
+
+		// Session-id-in-use: retry once with --resume. Independent of
+		// MaxRetries — this is a specific recovery path, not a transient
+		// error retry. The second attempt (sessionIsNew=false) bypasses
+		// the transient retry loop to avoid infinite nesting.
+		if req.Session.ID != "" && sessionIsNew && isSessionIDInUseErr(err) {
+			req.Session.New = false
+			continue
+		}
+
+		// Don't retry permanent errors.
+		if !isRetryable(err) {
+			return result, err
+		}
+
+		// No more retries left.
+		if attempt >= maxRetries {
+			return result, err
+		}
+
+		// Exponential backoff, clamped.
+		delay := retryDelay * (1 << attempt)
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+		sink.Emit(bridle.TurnError{
+			Err:   fmt.Errorf("claudecode: retrying in %v (attempt %d/%d): %w", delay, attempt+1, maxRetries, err),
+			Stage: "retry",
+		})
+		select {
+		case <-ctx.Done():
+			return bridle.ProviderResult{}, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
 }
 
 // isSessionIDInUseErr matches claude-code's "Session ID ... is already
@@ -208,11 +265,13 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	close(procExited) // signal the cancel watcher that the process is gone
 	<-streamDone
 
+	stderrStr := stderr.String()
+
 	if waitErr != nil && parseErr == nil {
 		if ctx.Err() != nil {
 			result.StopReason = bridle.StopReasonAborted
 		} else if result.FinalText != "" || len(result.ToolCalls) > 0 || len(result.SessionDelta) > 0 {
-			pe := classifyProviderError(stderr.String(), waitErr)
+			pe := classifyProviderError(stderrStr, waitErr)
 			if pe.Kind == bridle.ProviderErrorAuthFailed || pe.Kind == bridle.ProviderErrorRateLimit || pe.Kind == bridle.ProviderErrorServerError {
 				// API-level error — the "content" is a synthetic
 				// response from the CLI (e.g. "Not logged in"), not
@@ -233,16 +292,39 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 				Stage: "subprocess_exit_partial",
 			})
 		} else {
-			pe := classifyProviderError(stderr.String(), waitErr)
+			pe := classifyProviderError(stderrStr, waitErr)
 			sink.Emit(bridle.TurnError{Err: pe, Stage: string(pe.Kind)})
 			return bridle.ProviderResult{}, pe
 		}
 	}
 
+	// Surface stderr content even when the process exited cleanly.
+	// Deprecation warnings, rate-limit headers, and TLS verification
+	// notes appear here — without surfacing them, operators have no
+	// signal that something is degrading. Non-fatal: we still return
+	// the result and don't flip StopReason.
+	if stderrStr != "" && waitErr == nil && parseErr == nil && ctx.Err() == nil {
+		sink.Emit(bridle.TurnError{
+			Err:   fmt.Errorf("claudecode: stderr output: %s", strings.TrimSpace(stderrStr)),
+			Stage: "stderr_output",
+		})
+	}
+
 	// If stream ended without a result event, that's truncation.
+	// Include stderr in the error so operators can see the real cause.
 	if parseErr == nil && result.StopReason == "" && ctx.Err() == nil {
-		parseErr = fmt.Errorf("claudecode: stream ended without result event")
+		msg := "claudecode: stream ended without result event"
+		if stderrStr != "" {
+			msg += " (stderr: " + strings.TrimSpace(stderrStr) + ")"
+		}
+		parseErr = fmt.Errorf("%s", msg)
 		sink.Emit(bridle.TurnError{Err: parseErr, Stage: "stream_truncated"})
+	}
+
+	// If parse failed, wrap the error with stderr context so operators
+	// see the real cause rather than a generic "stream read" message.
+	if parseErr != nil && stderrStr != "" {
+		parseErr = fmt.Errorf("claudecode: %w (stderr: %s)", parseErr, strings.TrimSpace(stderrStr))
 	}
 
 	return result, parseErr
@@ -624,6 +706,26 @@ func isAPIError(event map[string]json.RawMessage) bool {
 	return false
 }
 
+// isRetryable reports whether a provider error is transient and should
+// be retried. Rate limits, server errors, network errors, and timeouts
+// are retryable. Auth failures, TLS errors, and unknown subprocess exits
+// are permanent — retrying with the same credentials/network config
+// produces the same result.
+func isRetryable(err error) bool {
+	pe := &bridle.ProviderError{}
+	if !errors.As(err, &pe) {
+		return false
+	}
+	switch pe.Kind {
+	case bridle.ProviderErrorRateLimit,
+		bridle.ProviderErrorServerError,
+		bridle.ProviderErrorNetworkError,
+		bridle.ProviderErrorTimeout:
+		return true
+	}
+	return false
+}
+
 // classifyProviderError inspects the CLI's stderr and classifies the
 // subprocess error into a bridle.ProviderError so the activity log
 // surfaces a distinct diagnosis string instead of an opaque exit code.
@@ -632,6 +734,9 @@ func isAPIError(event map[string]json.RawMessage) bool {
 //   - "not logged in", "authentication_failed", "run /login" → auth_failed
 //   - "rate_limit", "rate limited" → rate_limit
 //   - "server_error", "internal server error", "overloaded" → server_error
+//   - "connection refused", "no route to host", "connection reset" → network_error
+//   - "timeout", "deadline exceeded", "timed out" → timeout
+//   - "certificate", "ssl", "tls" → tls_error
 //
 // Falls back to a generic subprocess-error ProviderError wrapping the
 // waitErr so callers still get a classified error rather than a raw
@@ -667,6 +772,37 @@ func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
 		return &bridle.ProviderError{
 			Kind:    bridle.ProviderErrorServerError,
 			Message: "claude-code: provider server error — the API returned an internal error",
+			Err:     waitErr,
+		}
+	}
+
+	if strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "no route to host") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "eof") {
+		return &bridle.ProviderError{
+			Kind:    bridle.ProviderErrorNetworkError,
+			Message: "claude-code: network error connecting to provider",
+			Err:     waitErr,
+		}
+	}
+
+	if strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "deadline exceeded") ||
+		strings.Contains(lower, "timed out") {
+		return &bridle.ProviderError{
+			Kind:    bridle.ProviderErrorTimeout,
+			Message: "claude-code: request timed out",
+			Err:     waitErr,
+		}
+	}
+
+	if strings.Contains(lower, "certificate") ||
+		strings.Contains(lower, "ssl") ||
+		strings.Contains(lower, "tls") {
+		return &bridle.ProviderError{
+			Kind:    bridle.ProviderErrorTLSError,
+			Message: "claude-code: TLS error connecting to provider",
 			Err:     waitErr,
 		}
 	}

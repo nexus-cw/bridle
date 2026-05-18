@@ -70,7 +70,69 @@ func TestClassifyProviderError_ServerError(t *testing.T) {
 	}
 }
 
+func TestClassifyProviderError_NetworkError(t *testing.T) {
+	waitErr := errors.New("exit status 1")
+	tests := []struct {
+		name   string
+		stderr string
+	}{
+		{"connection refused", "Error: dial tcp 127.0.0.1:443: connection refused"},
+		{"no route to host", "Error: no route to host"},
+		{"connection reset", "Error: read tcp ... connection reset by peer"},
+		{"eof", "Error: unexpected EOF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pe := classifyProviderError(tt.stderr, waitErr)
+			if pe.Kind != bridle.ProviderErrorNetworkError {
+				t.Errorf("Kind = %q; want %q", pe.Kind, bridle.ProviderErrorNetworkError)
+			}
+		})
+	}
+}
+
+func TestClassifyProviderError_Timeout(t *testing.T) {
+	waitErr := errors.New("exit status 1")
+	tests := []struct {
+		name   string
+		stderr string
+	}{
+		{"timeout", "Error: context deadline exceeded (timeout)"},
+		{"deadline exceeded", "Error: deadline exceeded"},
+		{"timed out", "Error: request timed out after 30s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pe := classifyProviderError(tt.stderr, waitErr)
+			if pe.Kind != bridle.ProviderErrorTimeout {
+				t.Errorf("Kind = %q; want %q", pe.Kind, bridle.ProviderErrorTimeout)
+			}
+		})
+	}
+}
+
+func TestClassifyProviderError_TLSError(t *testing.T) {
+	waitErr := errors.New("exit status 1")
+	tests := []struct {
+		name   string
+		stderr string
+	}{
+		{"certificate", "Error: x509: certificate signed by unknown authority"},
+		{"ssl", "Error: SSL handshake failed"},
+		{"tls", "Error: tls: protocol version not supported"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pe := classifyProviderError(tt.stderr, waitErr)
+			if pe.Kind != bridle.ProviderErrorTLSError {
+				t.Errorf("Kind = %q; want %q", pe.Kind, bridle.ProviderErrorTLSError)
+			}
+		})
+	}
+}
+
 func TestClassifyProviderError_GenericFallback(t *testing.T) {
+
 	waitErr := errors.New("exit status 2")
 	pe := classifyProviderError("some unexpected stderr output", waitErr)
 	if pe.Kind != "subprocess_exit" {
@@ -78,6 +140,55 @@ func TestClassifyProviderError_GenericFallback(t *testing.T) {
 	}
 	if pe.Err != waitErr {
 		t.Error("underlying error not preserved")
+	}
+}
+
+func TestIsRetryable(t *testing.T) {
+	tests := []struct {
+		name string
+		pe   *bridle.ProviderError
+		want bool
+	}{
+		{"rate_limit", &bridle.ProviderError{Kind: bridle.ProviderErrorRateLimit, Message: "rate limited"}, true},
+		{"server_error", &bridle.ProviderError{Kind: bridle.ProviderErrorServerError, Message: "server error"}, true},
+		{"network_error", &bridle.ProviderError{Kind: bridle.ProviderErrorNetworkError, Message: "network error"}, true},
+		{"timeout", &bridle.ProviderError{Kind: bridle.ProviderErrorTimeout, Message: "timed out"}, true},
+		{"auth_failed", &bridle.ProviderError{Kind: bridle.ProviderErrorAuthFailed, Message: "auth failed"}, false},
+		{"tls_error", &bridle.ProviderError{Kind: bridle.ProviderErrorTLSError, Message: "tls error"}, false},
+		{"subprocess_exit", &bridle.ProviderError{Kind: "subprocess_exit", Message: "generic exit"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRetryable(tt.pe)
+			if got != tt.want {
+				t.Errorf("isRetryable(%q) = %v; want %v", tt.pe.Kind, got, tt.want)
+			}
+		})
+	}
+
+	// Non-ProviderError should not be retryable.
+	if isRetryable(errors.New("some other error")) {
+		t.Error("isRetryable on plain error should be false")
+	}
+}
+
+func TestIsSessionIDInUseErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"exact match", errors.New("Session ID abc123 is already in use"), true},
+		{"ANSI prefix", errors.New("\x1b[31mSession ID xyz is already in use\x1b[0m"), true},
+		{"nil", nil, false},
+		{"unrelated", errors.New("connection refused"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSessionIDInUseErr(tt.err); got != tt.want {
+				t.Errorf("isSessionIDInUseErr(%v) = %v; want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 
